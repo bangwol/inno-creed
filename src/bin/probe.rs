@@ -5,6 +5,8 @@
 //!   cargo run --quiet --bin probe -- /human/attendapplication/0hr00001 '{"coCd":"1000"}'
 //!   cargo run --quiet --bin probe -- /eap/eap110A03 @body.json
 //!   (body 생략 시 {}. body가 '@경로'면 파일에서 읽음.)
+//!   cargo run --quiet --bin probe -- raw '/gw/contentsImgController/download/<경로>' out.png
+//!   (raw = 응답 바이트를 파일로. 본문 삽입 이미지처럼 JSON이 아닌 응답을 볼 때.)
 //!
 //! 성공판정 없이 {http, response:{resultCode,resultMsg,resultData}} 전체를 그대로 찍는다(2099 진단용).
 
@@ -116,6 +118,19 @@ async fn main() -> Result<()> {
         let out = inno_creed::modules::approval_submit::cancel_and_verify(&client, doc_id, form_id, purge).await;
         match out {
             Ok(v) => println!("{}", serde_json::to_string_pretty(&v)?),
+            Err(e) => println!("ERR {e}"),
+        }
+        return Ok(());
+    }
+
+    // 진단: `probe raw <path> <out>` → 응답 **바이트**를 파일로. JSON이 아닌 응답(이미지 등) 확인용.
+    if args.get(1).map(|s| s.as_str()) == Some("raw") {
+        let path = args.get(2).ok_or_else(|| anyhow!("usage: probe raw <path> <out>"))?;
+        let out = args.get(3).ok_or_else(|| anyhow!("usage: probe raw <path> <out>"))?;
+        let client = GwClient::new(creds::from_browser().ok());
+        client.ensure_session().await?;
+        match client.download_form(path, &[], out).await {
+            Ok((n, name)) => println!("{{\"bytes\":{n},\"filename\":{name:?}}}"),
             Err(e) => println!("ERR {e}"),
         }
         return Ok(());

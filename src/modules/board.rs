@@ -141,6 +141,11 @@ pub async fn read_post(c: &GwClient, art_seq_no: &str) -> Result<Value> {
         "readCnt": s(art, "read_cnt"),
         "fileCnt": file_cnt(art),
         "attachmentUid": s(art, "uid"),
+        // 본문 삽입 이미지의 경로(에디터 업로드분). **정식 첨부가 아니므로 `fileCnt`에 안 잡힌다**
+        // — 첨부 0건이면서 이 값이 있는 글이 실재한다(실측: 3006은 fileCnt=0, img_path 있음).
+        // 본문에 이미지가 여러 장이면 여기 실리는 건 첫 장뿐이고, 나머지는 `content`의
+        // `[이미지]` 자리표시자로 센다. 서버가 준 상대경로 그대로 — 이 서버에 다운로드 도구는 없다.
+        "imgPath": s(art, "img_path"),
         "content": collapse_ws(&html_to_text(&s(art, "art_content"))),
         "comments": comments
     }))
@@ -283,18 +288,72 @@ pub(crate) fn html_to_text(html: &str) -> String {
                     out.push('\n');
                 } else if t.starts_with("td") || t.starts_with("th") {
                     out.push('\t');
+                } else if t.starts_with("img") {
+                    // 이미지는 태그와 함께 사라지면 **흔적이 0**이라, 본문이 통째로 비어 보인다
+                    // (실측: 게시글 3006은 본문의 실질이 이미지 한 장인데 평문화 결과에 아무것도
+                    // 남지 않았다). 자리표시자로 존재와 위치를 남긴다.
+                    out.push_str("[이미지]");
                 }
             }
             _ if in_tag => tag.push(ch),
             _ => out.push(ch),
         }
     }
-    out.replace("&nbsp;", " ")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
+    decode_entities(&out)
+}
+
+/// HTML 엔티티 디코드 — 이름 표기(`&nbsp;`)와 **숫자 표기(`&#160;`/`&#xA0;`)를 함께** 처리한다.
+///
+/// ⚠️ 숫자 표기를 일반 처리하는 이유: 같은 문자를 어느 표기로 쓸지는 그 HTML을 만든 프로그램이
+/// 정하고 우리는 통제하지 못한다(외부 메일·게시글). 예전엔 이름 5종 + `&#39;` 하나만 치환했는데,
+/// 그 하나가 박혀 있다는 것 자체가 두더지잡기의 흔적이었다 — 실측에서 Teams 알림 메일이
+/// `&#160;`을 123회 흘려보냈고(`captures/mail-*`), 디코드되지 않은 탓에 여백이 되지 못하고
+/// `&#160;` 글자 그대로 본문에 남았다. 종류별로 막지 않고 표기 자체를 해석해 그 부류를 닫는다.
+///
+/// 엔티티가 아닌 `&`(예: "A & B")는 건드리지 않는다 — `;`가 8바이트 안에 없으면 그냥 흘린다.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if let Some(j) = tail[1..].find(';').filter(|&j| j <= 8)
+            && let Some(c) = entity_char(&tail[1..1 + j])
+        {
+            out.push(c);
+            rest = &tail[1 + j + 1..];
+        } else {
+            // 엔티티로 해석되지 않으면 `&` 한 글자만 흘리고 그 뒤에서 다시 찾는다.
+            out.push('&');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 엔티티 본문(`&`와 `;` 사이) → 문자. 모르는 이름은 `None`(원문 보존).
+/// nbsp는 **평범한 공백으로 낮춘다** — 이름·숫자 어느 표기로 왔든 같게 보이도록, 그리고
+/// `collapse_ws`가 접어낼 수 있도록(U+00A0 그대로 두면 유니코드 공백이라 접히긴 하나,
+/// `collapse_ws`를 안 거치는 제목·발신자에는 눈에 안 보이는 문자로 남는다).
+fn entity_char(body: &str) -> Option<char> {
+    let c = match body {
+        "nbsp" => '\u{a0}',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "amp" => '&',
+        _ => {
+            let num = body.strip_prefix('#')?;
+            let n = match num.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => num.parse().ok()?,
+            };
+            char::from_u32(n)?
+        }
+    };
+    Some(if c == '\u{a0}' { ' ' } else { c })
 }
 
 /// 연속 공백/개행 정리(태그 제거 후 남는 과도한 공백 축약). 빈 줄은 최대 1개까지 유지.
@@ -338,11 +397,44 @@ mod tests {
         assert_eq!(html_to_text("<span>가</span>나"), "가나");            // 인라인은 그대로
     }
 
+    /// 이미지는 태그와 함께 지워지면 흔적이 0이라, 본문의 실질이 이미지인 글이 빈 글로 보인다.
+    /// 실측 원문(`captures/board-viewpost_3006.json`)의 img 태그를 그대로 쓴다.
+    #[test]
+    fn html_to_text는_이미지_자리를_남긴다() {
+        let real = r#"<img src="/gw/contentsImgController/download/gcmsAmaranth31433/editorImg/fc4aa722-ab83-4527-91da-342140303c5c_png" width="1156" height="821" style="width:100%;height:100%;">"#;
+        assert_eq!(html_to_text(real), "[이미지]");
+        assert_eq!(html_to_text("앞<img src=x>뒤"), "앞[이미지]뒤");
+        // 상대경로라 메일의 `count_remote_resources`(src="http)로는 안 잡힌다 → 자리표시자가 유일한 신호.
+        assert!(!html_to_text(real).is_empty());
+    }
+
     #[test]
     fn html_to_text는_엔티티를_디코드한다() {
         assert_eq!(html_to_text("a&nbsp;b"), "a b");
         assert_eq!(html_to_text("&lt;tag&gt;"), "<tag>");
         assert_eq!(html_to_text("&quot;q&quot; &#39;s&#39; &amp;"), "\"q\" 's' &");
+    }
+
+    /// 숫자 표기는 이름 표기와 **같은 문자**다 — 어느 쪽으로 오든 결과가 같아야 한다.
+    /// (실측: Teams 알림 메일이 `&#160;`만 123회 흘렸고 그대로 본문에 글자로 남았다.)
+    #[test]
+    fn html_to_text는_숫자_엔티티도_디코드한다() {
+        assert_eq!(html_to_text("a&#160;b"), "a b"); // &nbsp; 와 동일 결과
+        assert_eq!(html_to_text("a&#xA0;b"), "a b"); // 16진도 동일
+        assert_eq!(html_to_text("&#8211;&#8203;&#8220;"), "–\u{200b}“");
+        assert_eq!(collapse_ws(&html_to_text("가&#160;&#160;&#160;나")), "가 나"); // 접혀서 사라짐
+    }
+
+    /// 엔티티가 아닌 `&`를 먹어치우면 본문이 조용히 망가진다.
+    #[test]
+    fn decode_entities는_엔티티_아닌_앰퍼샌드를_보존한다() {
+        assert_eq!(html_to_text("A &amp; B"), "A & B");
+        assert_eq!(html_to_text("A & B"), "A & B"); // 맨 `&`
+        assert_eq!(html_to_text("a & b; c"), "a & b; c"); // `;`가 뒤에 있어도 엔티티 아님
+        assert_eq!(html_to_text("&amp;lt;"), "&lt;"); // 이중 디코드 금지
+        assert_eq!(html_to_text("&#99999999;"), "&#99999999;"); // 코드포인트 범위 밖
+        assert_eq!(html_to_text("&unknown;"), "&unknown;"); // 모르는 이름
+        assert_eq!(html_to_text("&"), "&");
     }
 
     #[test]

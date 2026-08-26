@@ -627,6 +627,12 @@ body(JSON): { art_seq_no, menuCode:"UFA", pageCode:"UFA1000", moduleCode:"UF",
 
 - ⚠️ **ViewPost 호출 시 조회수(read_cnt) 증가** — 순수 조회가 아니라 실제 "열람" 처리.
 - `art_content`는 인라인 스타일 포함 HTML(수십 KB) → `modules/board.rs`가 태그 제거·엔티티 디코드로 평문화해서 반환.
+- **본문 삽입 이미지**(에디터 업로드분)는 정식 첨부가 아니다 — `file_cnt`에 안 잡히고 `ecm001A04` 목록에도 없다.
+  실측(글 3006, `captures/board-viewpost_3006.json`): `file_cnt="0"`인데 `file_yn="Y"`, 본문 끝에
+  `<img src="/gw/contentsImgController/download/gcmsAmaranth31433/editorImg/<uuid>_png">` 1장, 그 경로가
+  `art.img_path`에도 그대로 실린다(`pic_file_id`는 별개 값 — 용도 미실측이라 도구가 내지 않는다).
+  ⚠️ **src가 상대경로**라 메일의 `count_remote_resources`(`src="http`만 셈)로는 0이 나온다 — 재사용 금지.
+  → 도구는 평문에 `[이미지]` 자리표시자를 남기고(위치·장수), 첫 장 경로를 `imgPath`로 낸다.
 - 필드 타입 혼용 주의: `read_cnt`가 목록에선 문자열, 상세에선 정수 → `json_str`로 흡수.
 
 ### 첨부 목록 (ecm001A04) → `list_notice_attachments`

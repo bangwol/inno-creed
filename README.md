@@ -211,7 +211,7 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱
  ├─ modules  자원 · 일정 · 메일 · 게시판 · 전자결재 · 근태 · 조직
  │           API 래퍼 + 파생 조회 + 소유권 가드 · read-back 검증
- └─ mcp      rmcp stdio 서버 — tools/(도구 52개, 도메인별) · args/(인자 스키마) · 에러 변환
+ └─ mcp      rmcp stdio 서버 — tools/(도구 53개, 도메인별) · args/(인자 스키마) · 에러 변환
 ```
 
 크레덴셜만 브라우저에서 빌려오고, 실행은 전부 순수 HTTP입니다. 서명·세션 규격은 [architecture.md](docs/architecture.md)에 정리돼 있습니다.

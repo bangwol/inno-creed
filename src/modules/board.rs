@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
 use crate::client::GwClient;
+use crate::error::InvalidInput;
 // json_str은 util 소유. mail 모듈이 `board::json_str`로 참조해 온 경로를 유지하려고 재수출한다.
 pub(crate) use crate::util::json_str;
 use crate::util::digits_only;
@@ -90,6 +91,17 @@ fn file_cnt(v: &Value) -> Value {
     json!(json_str(v.get("file_cnt")).trim().parse::<i64>().unwrap_or(0))
 }
 
+/// 게시글의 본문 이미지 경로 전부 — 본문 파싱 결과 + 서버가 준 `img_path`(중복이면 안 넣는다).
+/// 순서는 본문 등장 순서를 유지하고, 파싱이 놓친 `img_path`만 맨 앞에 붙인다.
+fn body_images(art: &Value) -> Vec<String> {
+    let mut list = extract_img_srcs(&json_str(art.get("art_content")));
+    let server = json_str(art.get("img_path"));
+    if !server.is_empty() && !list.contains(&server) {
+        list.insert(0, server);
+    }
+    list
+}
+
 /// 게시글 상세 — `ViewPost`. 본문(HTML→텍스트)·댓글 포함.
 /// ⚠️ 호출 시 조회수가 증가한다(실제 열람 처리) — 순수 조회는 아님.
 pub async fn read_post(c: &GwClient, art_seq_no: &str) -> Result<Value> {
@@ -141,11 +153,11 @@ pub async fn read_post(c: &GwClient, art_seq_no: &str) -> Result<Value> {
         "readCnt": s(art, "read_cnt"),
         "fileCnt": file_cnt(art),
         "attachmentUid": s(art, "uid"),
-        // 본문 삽입 이미지의 경로(에디터 업로드분). **정식 첨부가 아니므로 `fileCnt`에 안 잡힌다**
-        // — 첨부 0건이면서 이 값이 있는 글이 실재한다(실측: 3006은 fileCnt=0, img_path 있음).
-        // 본문에 이미지가 여러 장이면 여기 실리는 건 첫 장뿐이고, 나머지는 `content`의
-        // `[이미지]` 자리표시자로 센다. 서버가 준 상대경로 그대로 — 이 서버에 다운로드 도구는 없다.
-        "imgPath": s(art, "img_path"),
+        // 본문 삽입 이미지 경로 전부(등장 순서 = `content`의 `[이미지]` 순서).
+        // **정식 첨부가 아니므로 `fileCnt`에 안 잡힌다** — 첨부 0건이면서 이미지가 있는 글이
+        // 실재한다(실측: 3006은 fileCnt=0, 이미지 1장). `download_body_image`에 그대로 넘긴다.
+        // 서버의 `img_path`(첫 장만 주는 필드)도 합쳐 둔다 — 본문 파싱이 놓쳐도 남게.
+        "images": body_images(art),
         "content": collapse_ws(&html_to_text(&s(art, "art_content"))),
         "comments": comments
     }))
@@ -256,6 +268,96 @@ fn split_uids(uid: &str) -> Vec<String> {
         .collect()
 }
 
+
+/// 본문 삽입 이미지가 실려 오는 엔드포인트. **다운로드 허용 목록**이며 실측된 둘뿐이다
+/// (`captures/board-viewpost_3006.json`, `captures/mail-inline-img_mail002A01.json`).
+const BODY_IMAGE_PREFIXES: [&str; 2] = ["/gw/contentsImgController/download/", "/mail/mail002A30"];
+
+/// 본문 HTML의 `<img src>` 목록(등장 순서 보존). 같은 이미지를 두 번 쓰면 두 번 담는다 —
+/// 평문의 `[이미지]` 자리표시자와 **개수가 맞아야** 호출자가 n번째 이미지를 짚을 수 있다.
+pub(crate) fn extract_img_srcs(html: &str) -> Vec<String> {
+    let lower = html.to_ascii_lowercase(); // ASCII만 바뀌므로 바이트 오프셋은 원문과 같다
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("<img") {
+        let start = i + rel;
+        let Some(rel_end) = html[start..].find('>') else { break };
+        let end = start + rel_end;
+        if let Some(src) = img_src(&html[start..end]) {
+            out.push(src);
+        }
+        i = end + 1;
+    }
+    out
+}
+
+/// `<img ...>` 태그 문자열에서 `src` 값. 따옴표는 홑/겹 둘 다, 없어도 받는다.
+/// `data-src` 같은 다른 속성에 걸리지 않게 **앞이 공백인지**를 본다.
+fn img_src(tag: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(rel) = lower[from..].find("src") {
+        let p = from + rel;
+        let boundary = p == 0 || lower.as_bytes()[p - 1].is_ascii_whitespace();
+        let after = &tag[p + 3..];
+        // `srcset=`은 여기서 걸러진다 — "src" 뒤가 바로 `=`가 아니다.
+        if boundary
+            && let Some(v) = after.trim_start().strip_prefix('=')
+        {
+            let v = v.trim_start();
+            let val = match v.chars().next() {
+                Some(q @ ('"' | '\'')) => v[1..].split(q).next().unwrap_or(""),
+                _ => v.split_whitespace().next().unwrap_or(""),
+            };
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+        from = p + 3;
+    }
+    None
+}
+
+/// 본문 이미지 src가 **이 서버에서 받아올 수 있는 것**인지. 외부 호스트는 전부 거짓.
+pub(crate) fn is_body_image(src: &str) -> bool {
+    gw_image_path(src).is_some()
+}
+
+/// src → 우리 서버 경로. 절대 URL이면 gw 호스트일 때만, 그리고 허용 목록에 든 경로만 통과.
+fn gw_image_path(src: &str) -> Option<&str> {
+    let p = match src.strip_prefix("https://gw.innogrid.com") {
+        Some(rest) => rest,
+        None if src.starts_with('/') => src,
+        None => return None,
+    };
+    BODY_IMAGE_PREFIXES.iter().any(|q| p.starts_with(q)).then_some(p)
+}
+
+/// 본문 삽입 이미지 다운로드 — **게시판·메일 공용**(둘 다 같은 서명 요청 하나로 받아진다).
+/// `src`는 `read_notice`의 `images[]` 또는 `read_mail`의 `inlineImages[]` 값을 그대로.
+///
+/// ⚠️ **경로를 무제한으로 받지 않는다.** `download_form`은 서명 POST라, 임의 경로를 허용하면
+/// 다운로드를 가장해 부작용 있는 API를 때릴 수 있다(예: `ecm001A05`는 삭제다). 실측된 이미지
+/// 엔드포인트 둘만 통과시킨다.
+/// ⚠️ **외부 호스트는 받지 않는다.** 추적 픽셀을 대신 열어주는 꼴이 되고, `read_mail`이 지켜온
+/// "외부 리소스를 자동 fetch하지 않는다"는 정책을 도구가 우회로로 뚫는 셈이 된다.
+pub async fn download_body_image(c: &GwClient, src: &str, out_path: &str) -> Result<Value> {
+    let path = gw_image_path(src).ok_or_else(|| {
+        InvalidInput(format!(
+            "본문 이미지 경로가 아니다: {src}\n\
+             read_notice의 images[] 또는 read_mail의 inlineImages[] 값을 그대로 줄 것. \
+             외부 호스트 이미지(서명 로고·추적 픽셀 등)는 의도적으로 받지 않는다."
+        ))
+    })?;
+    let (size, filename) = c.download_form(path, &[], out_path).await?;
+    Ok(json!({
+        "ok": true,
+        "path": out_path,
+        "bytes": size,
+        "serverFileName": filename,
+        "source": path
+    }))
+}
 
 /// 게시글 HTML 본문을 대략적인 평문으로 변환(외부 크레이트 없이). 블록 경계는 개행으로,
 /// 태그 제거, 주요 엔티티 디코드. 완벽한 렌더링이 아니라 에이전트 읽기용 근사.
@@ -423,6 +525,33 @@ mod tests {
         assert_eq!(html_to_text("a&#xA0;b"), "a b"); // 16진도 동일
         assert_eq!(html_to_text("&#8211;&#8203;&#8220;"), "–\u{200b}“");
         assert_eq!(collapse_ws(&html_to_text("가&#160;&#160;&#160;나")), "가 나"); // 접혀서 사라짐
+    }
+
+    /// `images[]`의 순서·개수가 평문의 `[이미지]`와 어긋나면 n번째 이미지를 짚을 수 없다.
+    #[test]
+    fn extract_img_srcs는_등장순서대로_전부_뽑는다() {
+        let html = r#"<p>가</p><img src="/a.png"><p>나</p><img src='/b.png'><img src=/c.png >"#;
+        assert_eq!(extract_img_srcs(html), ["/a.png", "/b.png", "/c.png"]);
+        assert_eq!(html_to_text(html).matches("[이미지]").count(), 3); // 자리표시자와 개수 일치
+        assert_eq!(extract_img_srcs("<img src=\"/x.png\"><img src=\"/x.png\">").len(), 2); // 중복도 둘
+        assert!(extract_img_srcs("<p>이미지 없음</p>").is_empty());
+        assert!(extract_img_srcs("<img data-src=\"/no.png\">").is_empty()); // 다른 속성에 안 걸린다
+        assert!(extract_img_srcs("<img srcset=\"/no.png 2x\">").is_empty());
+        assert_eq!(extract_img_srcs("<img alt=\"사진\" src=\"/한글.png\">"), ["/한글.png"]); // 멀티바이트
+    }
+
+    /// ⛔ 허용 목록이 무너지면 서명 POST로 임의 API를 때릴 수 있게 된다(예: ecm001A05=삭제).
+    /// 그리고 외부 호스트를 통과시키면 추적 픽셀을 대신 열어주는 꼴이 된다.
+    #[test]
+    fn is_body_image는_허용된_두_경로만_통과시킨다() {
+        assert!(is_body_image("/gw/contentsImgController/download/gcms/editorImg/x_png"));
+        assert!(is_body_image("/mail/mail002A30?domain=innogrid.com&path=abc&index=0"));
+        assert!(is_body_image("https://gw.innogrid.com/mail/mail002A30?index=0")); // 절대 URL도
+        assert!(!is_body_image("https://www.innogrid.com/api/v1/file/download/x")); // 외부 호스트
+        assert!(!is_body_image("https://evil.example.com/gw/contentsImgController/download/x"));
+        assert!(!is_body_image("/ecm/ecm001A05")); // 삭제 API
+        assert!(!is_body_image("/mail/mail002A05")); // 메일 삭제
+        assert!(!is_body_image(""));
     }
 
     /// 엔티티가 아닌 `&`를 먹어치우면 본문이 조용히 망가진다.

@@ -632,8 +632,31 @@ body(JSON): { art_seq_no, menuCode:"UFA", pageCode:"UFA1000", moduleCode:"UF",
   `<img src="/gw/contentsImgController/download/gcmsAmaranth31433/editorImg/<uuid>_png">` 1장, 그 경로가
   `art.img_path`에도 그대로 실린다(`pic_file_id`는 별개 값 — 용도 미실측이라 도구가 내지 않는다).
   ⚠️ **src가 상대경로**라 메일의 `count_remote_resources`(`src="http`만 셈)로는 0이 나온다 — 재사용 금지.
-  → 도구는 평문에 `[이미지]` 자리표시자를 남기고(위치·장수), 첫 장 경로를 `imgPath`로 낸다.
+  → 도구는 평문에 `[이미지]` 자리표시자를 남기고(위치·장수), 경로 전부를 `images[]`로 낸다(순서 일치).
+    `img_path`는 첫 장만 주므로 본문 파싱 결과와 합집합으로 담는다.
 - 필드 타입 혼용 주의: `read_cnt`가 목록에선 문자열, 상세에선 정수 → `json_str`로 흡수.
+
+### 본문 삽입 이미지 다운로드 → `download_body_image`
+
+```
+POST /gw/contentsImgController/download/<저장소>/editorImg/<uuid>_<ext>   # 게시판
+POST /mail/mail002A30?domain=<도메인>&path=<base64>&index=<n>&type=<ext>   # 메일
+(빈 form body + 서명 헤더만)
+→ (성공) 이미지 바이트. 게시판 쪽은 Content-Disposition에 `<uuid>.<ext>`.
+```
+
+- **첨부 다운로드(`ecm001A03`)와 완전히 다른 경로다** — authKeyMap도 fileSn도 없다.
+  실측: 게시판 PNG 1156×821 714KB, 메일 PNG 1272×716 220KB. 쿼리스트링이 붙어도 서명이 통과한다.
+- ⛔ **경로 허용 목록이 있다**(`board::BODY_IMAGE_PREFIXES`). `download_form`은 서명 POST라 임의
+  경로를 받으면 다운로드를 가장해 부작용 있는 API를 때릴 수 있다 — `ecm001A05`는 삭제다. 위 두
+  접두어만 통과시키고 나머지는 `-32602`로 거부한다(라이브 점검이 그 거부를 검사한다).
+- ⛔ **외부 호스트는 받지 않는다.** 메일 본문엔 회사 서명 로고 같은 외부 이미지가 섞여 있는데
+  (`https://www.innogrid.com/api/v1/file/download/...`), 받아주면 "본문을 렌더링하지 않아 추적
+  픽셀을 열지 않는다"는 `read_mail`의 전제가 도구로 뚫린다. 그래서 `inlineImages[]`에는 **서버
+  호스팅 이미지만** 싣고 외부 것은 개수만 `remoteResourceCount`로 알린다
+  (실측 muid 13893652: inlineImages 1 · remoteResourceCount 2 — 차이가 서명 로고다).
+- ⚠️ 메일의 이미지 URL은 **html 파트에만** 있다. `read_mail`의 본문은 plain 파트를 우선하므로,
+  `inlineImages`는 본문 출처와 무관하게 항상 html 파트에서 뽑는다.
 
 ### 첨부 목록 (ecm001A04) → `list_notice_attachments`
 

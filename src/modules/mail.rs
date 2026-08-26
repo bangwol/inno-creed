@@ -1145,6 +1145,16 @@ pub async fn read_mail(c: &GwClient, muid: &str) -> Result<Value> {
         "date": json_str(dm.get("date")),
         "body": body,
         "attachments": attachments,
+        // 본문에 박힌 이미지 중 **이 서버가 갖고 있는 것**만. `download_body_image`에 그대로 넘긴다.
+        // ⚠️ 외부 호스트 이미지(서명 로고·추적 픽셀)는 **일부러 뺀다** — 목록에 실어두면 도구가
+        // 그걸 받아오는 우회로가 되어, 본문을 렌더링하지 않는다는 이 모듈의 전제가 깨진다.
+        // 외부 것이 몇 개인지는 아래 `remoteResourceCount`가 이미 말해준다.
+        // ⚠️ 본문(`body`)이 plain 파트에서 왔다면 그쪽엔 `<img>`가 없다 — 그래서 이미지 목록은
+        // 본문 출처와 무관하게 **항상 html 파트**에서 뽑는다(실측: muid 13893652).
+        "inlineImages": crate::modules::board::extract_img_srcs(html)
+            .into_iter()
+            .filter(|s| crate::modules::board::is_body_image(s))
+            .collect::<Vec<_>>(),
         "remoteResourceCount": remote
     }))
 }

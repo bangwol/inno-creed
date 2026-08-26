@@ -124,6 +124,8 @@ fixtures 의 `expectedApprovers`/`expectedRefer`/`expectedOper` 와 다르면 **
 ## 부작용을 인지할 것
 
 - `read_notice` 는 게시글 **조회수를 1 올린다**. 되돌릴 수 없어 그대로 둔다(무해).
+  최신 공지에 본문 이미지가 없는 날은 `bodyImage.artSeqNo` fixture의 글을 한 번 더 읽으므로
+  그 글의 조회수도 1 오른다(fixture를 비우면 `download_body_image` 실다운로드가 SKIP 된다).
 - `send_mail` → `delete_mail` 은 휴지통으로 보낼 뿐이다. 완전 삭제는 하지 않는다.
   발송 직후엔 서버가 아직 배달하지 않아 받은메일함에서 안 보일 수 있다 — **5초 간격으로 최대 30초까지
   기다렸다 지우고, 끝내 안 나타나면 성공으로 치지 않고 잔여물로 신고한다**(늦게 도착해 남는 것을 막는다).

@@ -80,3 +80,15 @@ pub struct DownloadAttachmentArgs {
     /// 저장 경로(절대경로 권장). 예: /tmp/notice.pdf
     pub out_path: String,
 }
+
+#[derive(Deserialize, rmcp::schemars::JsonSchema)]
+#[schemars(crate = "rmcp::schemars")]
+pub struct DownloadBodyImageArgs {
+    /// 본문 이미지 경로. read_notice의 `images[]` 또는 read_mail의 `inlineImages[]` 값을 **그대로**.
+    /// 상대경로·`https://gw.innogrid.com/...` 둘 다 받는다. 외부 호스트 주소는 거부한다.
+    #[serde(deserialize_with = "super::flex_string")]
+    #[schemars(schema_with = "super::flex_str_schema")]
+    pub src: String,
+    /// 저장 경로(절대경로 권장). 확장자는 원본에 맞출 것. 예: /tmp/notice-img.png
+    pub out_path: String,
+}

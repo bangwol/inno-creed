@@ -27,7 +27,7 @@ inno-creed는 로그인을 받지 않습니다. **서버가 도는 머신의 브
 
 ### 3. 파일 경로가 "서버 머신" 기준이다
 
-`download_mail_attachment` · `download_notice_attachment`는 **서버가 도는 머신의 로컬 경로**에 파일을 씁니다. `send_mail`의 첨부도 서버 머신의 로컬 경로에서 읽습니다. 클라이언트가 원격이면 이 경로들의 의미가 클라이언트 쪽 기대와 어긋납니다.
+`download_mail_attachment` · `download_notice_attachment` · `download_body_image`는 **서버가 도는 머신의 로컬 경로**에 파일을 씁니다. `send_mail`의 첨부도 서버 머신의 로컬 경로에서 읽습니다. 클라이언트가 원격이면 이 경로들의 의미가 클라이언트 쪽 기대와 어긋납니다.
 
 ### 결론: 같은 머신 안에서만
 

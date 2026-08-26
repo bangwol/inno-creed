@@ -22,6 +22,11 @@
   },
   "_approvalLine": "결재라인 생성/삭제에 쓸 양식. 상신은 하지 않으므로 아무에게도 통지되지 않는다.",
 
+  "bodyImage": {
+    "artSeqNo": "0"
+  },
+  "_bodyImage": "본문에 이미지가 박힌 공지 하나(`read_notice` 결과의 images[] 가 비지 않는 글). download_body_image 의 실제 다운로드를 검증하는 데만 쓴다 — 최신 공지·메일에 이미지가 없는 날에도 happy path 를 돌리기 위한 것이다. ⚠️ 이 글의 조회수가 1 오른다. 항목을 빼거나 artSeqNo 를 0 으로 두면 그 검증은 SKIP 된다.",
+
   "search": {
     "query": "회의"
   },

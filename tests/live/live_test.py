@@ -815,13 +815,17 @@ def body(mcp: Mcp, fx: dict, marker: str):
     # ── 2. ID 물린 상세 ──────────────────────────────────────────────────────
     if inbox and inbox["Records"]:
         muid = inbox["Records"][0]["muid"]
-        run(mcp, "read_mail", lambda d: (len(json.dumps(d)) > 100, "본문 반환"), muid=str(muid))
+        rm0 = run(mcp, "read_mail", lambda d: (len(json.dumps(d)) > 100, "본문 반환"), muid=str(muid))
+        mail_imgs = (rm0 or {}).get("inlineImages") or []
         att = [m for m in inbox["Records"] if m.get("attach")]
         sn = None  # ⚠️ file_sn 은 순번이 아니라 read_mail 이 주는 **서버 토큰**
         if att:
             rm = mcp.call("read_mail", muid=str(att[0]["muid"]))
             if rm[0] == "OK" and rm[1].get("attachments"):
                 sn = rm[1]["attachments"][0]["fileSn"]
+            # 이 호출은 어차피 하는 것 — 본문 이미지 후보도 여기서 같이 줍는다(추가 read_mail 없이).
+            if rm[0] == "OK":
+                mail_imgs += rm[1].get("inlineImages") or []
         if sn:
             run(mcp, "download_mail_attachment", lambda d: (
                 d["ok"] and d["bytes"] > 0, f"{d['serverFileName']} {d['bytes']}B"),
@@ -830,13 +834,14 @@ def body(mcp: Mcp, fx: dict, marker: str):
         else:
             skip("download_mail_attachment", "받은메일함에 첨부 있는 메일 없음")
     else:
+        mail_imgs = []
         skip("read_mail", "받은메일함 비어 있음")
         skip("download_mail_attachment", "받은메일함 비어 있음")
 
     if notices and notices["articles"]:
         a0 = notices["articles"][0]
-        run(mcp, "read_notice", lambda d: (len(json.dumps(d)) > 100, "본문 반환 ⚠️조회수+1"),
-            art_seq_no=str(a0["artSeqNo"]))
+        rn0 = run(mcp, "read_notice", lambda d: (len(json.dumps(d)) > 100, "본문 반환 ⚠️조회수+1"),
+                  art_seq_no=str(a0["artSeqNo"]))
         # ⚠️ fileCnt 는 **문자열**("0"도 truthy). 첨부 있는 글은 페이지를 넓혀 찾는다.
         big = mcp.call("list_notices", page_size=30)
         pool = big[1]["articles"] if big[0] == "OK" else notices["articles"]
@@ -857,8 +862,32 @@ def body(mcp: Mcp, fx: dict, marker: str):
             skip("list_notice_attachments", "첨부 있는 게시글 없음")
             skip("download_notice_attachment", "첨부 있는 게시글 없음")
     else:
+        rn0 = None
         for n in ("read_notice", "list_notice_attachments", "download_notice_attachment"):
             skip(n, "공지 목록 비어 있음")
+
+    # 본문 삽입 이미지 — 게시판·메일 어느 쪽이든 같은 도구로 받는다. 게시판을 먼저 쓰고
+    # (공지에 이미지가 흔하다), 없으면 방금 읽은 메일의 것으로 대체한다.
+    body_imgs = ((rn0 or {}).get("images") or []) + mail_imgs
+    if not body_imgs and str(fx.get("bodyImage", {}).get("artSeqNo", "0")) != "0":
+        # 최신 공지·메일에 이미지가 없는 날도 있다 — fixture로 지정한 글에서 확보한다(⚠️ 조회수+1).
+        pin = mcp.call("read_notice", art_seq_no=str(fx["bodyImage"]["artSeqNo"]))
+        if pin[0] == "OK":
+            body_imgs = pin[1].get("images") or []
+    if body_imgs:
+        run(mcp, "download_body_image", lambda d: (
+            d["ok"] and d["bytes"] > 0, f"{d['bytes']}B · {d['source'][:44]}"),
+            src=body_imgs[0], out_path=os.path.join(OUTDIR, "body_img.bin"))
+    else:
+        skip("download_body_image", "본문에 이미지 있는 공지·메일을 못 찾음")
+    # ⛔ 허용 목록이 무너지면 서명 POST로 임의 API를 때릴 수 있다(ecm001A05=삭제). 거부를 확인한다.
+    bad = mcp.call("download_body_image", src="/ecm/ecm001A05",
+                   out_path=os.path.join(OUTDIR, "must_not_exist.bin"))
+    if bad[0] == "ERR" and not os.path.exists(os.path.join(OUTDIR, "must_not_exist.bin")):
+        R.append(("PASS", "download_body_image(허용목록 밖 거부)", "ecm001A05 거부 · 파일 미생성"))
+    else:
+        R.append(("FAIL", "download_body_image(허용목록 밖 거부)",
+                  f"임의 경로가 통과했다 — 서명 POST 우회로가 열려 있다: {bad}"))
 
     docs = (ref or {}).get("documents") or []
     if docs and docs[0].get("docId"):

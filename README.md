@@ -67,8 +67,9 @@
 | 도구 | 기능 |
 |---|---|
 | `list_notices` | 공지/게시글 목록(본문 프리뷰, 검색어·기간 필터) |
-| `read_notice` | 게시글 1건 본문(평문)·댓글 — ⚠️ 조회수 증가 |
+| `read_notice` | 게시글 1건 본문(평문)·댓글 — 이미지는 `[이미지]`+`images[]` · ⚠️ 조회수 증가 |
 | `list_notice_attachments` / `download_notice_attachment` | 게시글 첨부 목록 / 다운로드 |
+| `download_body_image` | **본문 삽입 이미지** 다운로드(게시판·메일 공용) — 정식 첨부와 별개 경로 |
 
 **전자결재**
 | 도구 | 기능 |

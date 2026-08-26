@@ -323,6 +323,18 @@ pub(crate) fn is_body_image(src: &str) -> bool {
     gw_image_path(src).is_some()
 }
 
+/// `..` 세그먼트가 있으면 접두어 검사를 **통과한 뒤 다른 경로로 착지한다** — URL 파서가 요청
+/// 직전에 정규화하기 때문이다(실측: `/gw/contentsImgController/download/../../../ecm/ecm001A05`
+/// → `/ecm/ecm001A05` = 삭제 API). 파서는 퍼센트 인코딩된 `%2e`도 점으로 해석하므로 같이 막는다.
+/// src는 메일 본문에서 오고 **메일은 남이 보낸다** — 이 경로는 신뢰 입력이 아니다.
+fn has_dot_segment(path: &str) -> bool {
+    path.split('?')
+        .next()
+        .unwrap_or("")
+        .split('/')
+        .any(|seg| seg.to_ascii_lowercase().replace("%2e", ".") == "..")
+}
+
 /// src → 우리 서버 경로. 절대 URL이면 gw 호스트일 때만, 그리고 허용 목록에 든 경로만 통과.
 fn gw_image_path(src: &str) -> Option<&str> {
     let p = match src.strip_prefix("https://gw.innogrid.com") {
@@ -330,6 +342,9 @@ fn gw_image_path(src: &str) -> Option<&str> {
         None if src.starts_with('/') => src,
         None => return None,
     };
+    if has_dot_segment(p) {
+        return None;
+    }
     BODY_IMAGE_PREFIXES.iter().any(|q| p.starts_with(q)).then_some(p)
 }
 
@@ -552,6 +567,19 @@ mod tests {
         assert!(!is_body_image("/ecm/ecm001A05")); // 삭제 API
         assert!(!is_body_image("/mail/mail002A05")); // 메일 삭제
         assert!(!is_body_image(""));
+    }
+
+    /// ⛔ 접두어만 보면 `..`로 걸어 나갈 수 있다 — URL 파서가 요청 직전에 정규화하므로
+    /// 검사를 통과한 경로가 삭제 API에 착지한다(넷 다 실측으로 `/ecm/ecm001A05`가 됐다).
+    #[test]
+    fn is_body_image는_상위경로_탈출을_막는다() {
+        assert!(!is_body_image("/gw/contentsImgController/download/../../../ecm/ecm001A05"));
+        assert!(!is_body_image("/mail/mail002A30/../../ecm/ecm001A05?x=1"));
+        // 퍼센트 인코딩도 파서가 점으로 해석한다(대소문자 무관).
+        assert!(!is_body_image("/gw/contentsImgController/download/%2e%2e/%2e%2e/ecm/ecm001A05"));
+        assert!(!is_body_image("/gw/contentsImgController/download/%2E%2E/%2E%2E/ecm/ecm001A05"));
+        // 파일명에 점이 붙은 정상 경로까지 막으면 안 된다.
+        assert!(is_body_image("/gw/contentsImgController/download/gcms/editorImg/a..b_png"));
     }
 
     /// 엔티티가 아닌 `&`를 먹어치우면 본문이 조용히 망가진다.

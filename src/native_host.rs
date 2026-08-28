@@ -110,13 +110,25 @@ fn clear_cache() -> Result<()> {
 /// Windows에 항상 있는 도구라 레지스트리 FFI를 새로 안 만들어도 되기 때문 — 인자를
 /// `Command::args`로 넘기므로(셸을 안 거침) 경로에 공백이 있어도 별도 이스케이프가
 /// 필요 없다.
+/// native host 매니페스트 경로. **`install`(쓰기)과 `doctor`(확인)가 공유한다** — 경로를 두
+/// 군데 적으면 "등록했는데 doctor는 없다고 한다"가 생긴다. Windows 외에는 등록 자체가 없다.
+#[cfg(target_os = "windows")]
+pub fn manifest_path() -> Option<std::path::PathBuf> {
+    let local = std::env::var("LOCALAPPDATA").ok()?;
+    Some(std::path::PathBuf::from(format!("{local}\\inno-creed")).join(format!("{HOST_NAME}.json")))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn manifest_path() -> Option<std::path::PathBuf> {
+    None
+}
+
 #[cfg(target_os = "windows")]
 pub fn install(extension_id: &str) -> Result<()> {
     let exe = std::env::current_exe().context("실행파일 경로 취득 실패")?;
-    let local = std::env::var("LOCALAPPDATA").context("LOCALAPPDATA 없음")?;
-    let manifest_dir = std::path::PathBuf::from(format!("{local}\\inno-creed"));
-    std::fs::create_dir_all(&manifest_dir)?;
-    let manifest_path = manifest_dir.join(format!("{HOST_NAME}.json"));
+    let manifest_path = manifest_path().context("LOCALAPPDATA 없음")?;
+    let manifest_dir = manifest_path.parent().context("매니페스트 부모 경로 없음")?;
+    std::fs::create_dir_all(manifest_dir)?;
 
     let manifest = json!({
         "name": HOST_NAME,

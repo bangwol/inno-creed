@@ -5,6 +5,7 @@
 pub mod client;
 pub mod config;
 pub mod creds;
+pub mod doctor;
 pub mod error;
 pub mod mcp;
 pub mod modules;

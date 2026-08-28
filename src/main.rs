@@ -1,18 +1,29 @@
 //! inno-creed MCP 서버 (stdio).
-//! 크레덴셜(Chrome 쿠키 복호화) 취득 → gw API 도구를 rmcp로 노출.
+//! 크레덴셜(익스텐션 브릿지/브라우저 쿠키/크레덴셜 파일) 취득 → gw API 도구를 rmcp로 노출.
+//!
+//! 인자 없이 실행하면 MCP 서버로 뜬다. `doctor`/`auth`는 설치를 돕는 보조 명령이다.
 
-use anyhow::Result;
-use inno_creed::{client::GwClient, creds, mcp::Amaranth, native_host};
+use anyhow::{bail, Result};
+use inno_creed::{client::GwClient, creds, doctor, mcp::Amaranth, native_host};
 use rmcp::{transport::stdio, ServiceExt};
+use std::io::{IsTerminal, Write};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
+    // ⚠️ **인자 처리는 전부 서버가 뜨기 전에 끝낸다.** MCP stdio는 stdout이 JSON-RPC 채널이라,
+    // 서버 기동 후에 무언가 찍으면 프로토콜이 깨진다.
+
     // --version/-V: 인자 파싱기가 따로 없어 설치본 버전을 확인할 방법이 없었다.
     // 크레덴셜 취득(브라우저 쿠키 읽기) 전에 먼저 처리해 부작용 없이 즉시 종료한다.
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("inno-creed {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--help" || a == "-h" || a == "help") {
+        print_help();
         return Ok(());
     }
 
@@ -45,6 +56,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // 보조 서브커맨드. **native host 감지보다 뒤에 둔다** — 브라우저는 native host를 스폰할 때
+    // 확장 origin과 `--parent-window` 같은 인자를 제멋대로 붙이므로, 그 경로가 먼저 빠져나가야
+    // 아래 "알 수 없는 인자" 검사에 걸리지 않는다.
+    match args.first().map(String::as_str) {
+        Some("doctor") => std::process::exit(doctor::run().await),
+        Some("auth") => return auth_cmd(args.get(1).map(String::as_str)),
+        // 오타를 조용히 삼키고 서버로 뜨면, 사용자는 "명령이 먹통"으로만 본다.
+        Some(other) => bail!("알 수 없는 인자: {other}\n`inno-creed --help`로 사용법을 확인하세요."),
+        None => {}
+    }
+
     // 크리덴셜 취득 실패해도 서버는 뜬다(비치명적). 실패 시 도구 호출 시점에 로그인 안내를
     // tool 응답으로 반환한다(사용자가 채팅에서 볼 수 있게). 성공하면 캐시를 seed.
     let initial = match creds::from_browser() {
@@ -70,4 +92,79 @@ async fn main() -> Result<()> {
     let service = Amaranth::new(client).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+fn print_help() {
+    println!(
+        "inno-creed {} — 아마란스(gw.innogrid.com) MCP 서버\n\
+         \n\
+         사용법:\n\
+         \x20 inno-creed                            MCP 서버로 기동(stdio). MCP 클라이언트가 실행합니다.\n\
+         \x20 inno-creed doctor                     크레덴셜·설정이 어디서 막혔는지 진단합니다.\n\
+         \x20 inno-creed auth set                   BIZCUBE_AT/BIZCUBE_HK를 크레덴셜 파일에 저장합니다.\n\
+         \x20 inno-creed auth clear                 저장된 크레덴셜 파일을 지웁니다.\n\
+         \x20 inno-creed --install-extension-host   Chrome/Edge 확장용 native host를 등록합니다(Windows).\n\
+         \x20 inno-creed --version                  버전을 출력합니다.\n\
+         \n\
+         설치가 막히면 먼저 `inno-creed doctor`를 실행하세요.",
+        env!("CARGO_PKG_VERSION")
+    );
+}
+
+fn auth_cmd(sub: Option<&str>) -> Result<()> {
+    match sub {
+        Some("set") => auth_set(),
+        Some("clear") => {
+            if creds::clear_creds_file()? {
+                println!("크레덴셜 파일을 지웠습니다.");
+            } else {
+                println!("지울 크레덴셜 파일이 없습니다.");
+            }
+            Ok(())
+        }
+        _ => bail!("사용법: inno-creed auth set | inno-creed auth clear"),
+    }
+}
+
+/// 쿠키 값을 받아 크레덴셜 파일에 저장한다.
+///
+/// **stdin으로만 받는다** — 인자로 받으면 셸 히스토리(PowerShell 포함)와 프로세스 목록에
+/// 세션 토큰이 그대로 남는다. 이 두 값은 그룹웨어 로그인 세션 그 자체다.
+///
+/// 화면에는 그대로 보인다(가림 처리는 의존성이 필요해 하지 않는다) — 어차피 DevTools에서
+/// 복사해 오는 값이라 화면에 이미 떠 있었다.
+fn auth_set() -> Result<()> {
+    let piped = !std::io::stdin().is_terminal();
+    if !piped {
+        println!(
+            "브라우저에서 gw.innogrid.com 접속 → F12 → Application → Cookies →\n\
+             BIZCUBE_AT / BIZCUBE_HK 의 Value를 복사해 붙여넣으세요.\n"
+        );
+    }
+    let auth_token = prompt("BIZCUBE_AT  : ", piped)?;
+    let sign_key = prompt("BIZCUBE_HK  : ", piped)?;
+    if auth_token.is_empty() || sign_key.is_empty() {
+        bail!("두 값이 모두 필요합니다 — 하나만으로는 서명이 만들어지지 않습니다.");
+    }
+    let path = creds::save_creds_file(&auth_token, &sign_key)?;
+    println!("\n저장했습니다: {}", path.display());
+    #[cfg(not(unix))]
+    println!("⚠️ Windows에서는 파일 권한을 좁히지 않습니다 — 홈 디렉토리 권한에만 의존합니다.");
+    println!(
+        "이 파일은 **가장 마지막** 소스입니다({}).\n\
+         MCP 설정에 INNO_CREED_AUTH_TOKEN/INNO_CREED_SIGN_KEY가 남아 있으면 그쪽이 이기니 지우세요.\n\
+         확인: inno-creed doctor",
+        creds::source_names().join(" → ")
+    );
+    Ok(())
+}
+
+fn prompt(label: &str, piped: bool) -> Result<String> {
+    if !piped {
+        print!("{label}");
+        std::io::stdout().flush()?;
+    }
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim().to_string())
 }

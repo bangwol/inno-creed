@@ -30,8 +30,9 @@ inno-creed (Rust MCP 서버, 헤드리스)
 ```
 
 - 구조 근거: MCP는 **실행층**, 크레덴셜만 외부(브라우저)에서 취득. 그래서 헤드리스로 돌아간다.
-- 서버 시작 순서: `creds::from_browser()`(크레덴셜 — 익스텐션 캐시 → Chrome → Edge(Win) → Firefox(비-Win)) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
-- 소스: `src/{creds,sign,util,client,error}.rs`, `src/modules/*.rs`, `src/mcp/{mod.rs,tools/,args/}`. 빌드 타깃은 `src/main.rs`(MCP 서버)와 `src/bin/probe.rs`(디버그 REPL — 임의 엔드포인트를 서명 호출) 둘.
+- 서버 시작 순서: `creds::from_browser()`(크레덴셜 — env → 익스텐션 캐시 → Chrome → Edge(Win) → Firefox(비-Win) → 크레덴셜 파일) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
+- 소스: `src/{creds,sign,util,client,error,doctor}.rs`, `src/modules/*.rs`, `src/mcp/{mod.rs,tools/,args/}`. 빌드 타깃은 `src/main.rs`(MCP 서버)와 `src/bin/probe.rs`(디버그 REPL — 임의 엔드포인트를 서명 호출) 둘.
+- **보조 서브커맨드는 서버가 뜨기 전에 끝난다**(`main.rs`): `doctor`(진단), `auth set/clear`(크레덴셜 파일), `--install-extension-host`, `--version`, `--help`. MCP stdio는 stdout이 JSON-RPC 채널이라 **서버 기동 후에 무언가 찍으면 프로토콜이 깨진다** — 그래서 전부 앞에 둔다. 순서상 native-host 감지가 이들보다 **앞**이어야 한다(브라우저가 확장 origin·`--parent-window` 같은 인자를 붙여 스폰하므로, 뒤에 두면 "알 수 없는 인자"에 걸린다).
 - **도구 라우터 합성**: 도메인마다 `#[tool_router(router = <도메인>_router, vis = "pub(crate)")]`로 라우터를 만들고 `Amaranth::all_tools()`가 `ToolRouter`의 `Add`로 합친다. `#[tool_handler(router = Self::all_tools())]`로 경로를 명시한다 — 핸들러는 라우터를 **필드로 갖지 않는다**(매크로가 호출 때마다 표현식을 평가하므로 필드에 담아도 읽히지 않는다).
 - **모듈 함수 시그니처 규약**: 첫 인자는 `c: &GwClient`. 예외는 `org::roster`/`org::find_person` 둘뿐이며 `&Arc<GwClient>`를 받는다 — 부서를 `JoinSet`으로 병렬 순회하는데 `spawn`이 `'static`을 요구하고 `GwClient`는 `RwLock` 보유로 `Clone`이 아니기 때문이다. 대안(신규 의존성/역할 분담 붕괴/직렬화)이 전부 대가가 커서 **의도적으로 예외를 유지**한다. 새 함수는 `&GwClient`를 쓸 것(상세: `src/modules/org.rs` 헤더 주석).
 - **파생 조회**: 일부 도구는 단일 API 래퍼가 아니라 여러 호출을 조합해 서버측에서 계산을 끝낸다 — `find_free_rooms`(자원 목록+예약을 인터벌 연산), `find_person`(부서 전수 순회 후 캐시), `my_reservations`·`pending_approvals`(필터+요약). LLM이 매 호출마다 같은 다단 조합을 반복하지 않게 하려는 것.
@@ -96,8 +97,27 @@ Firefox(**Windows에서는 시도 안 함** — 아래 참고). 첫 성공에서
 배제). Chrome/Edge의 파일잠금·`v20`과는 다른 메커니즘이지만 결과는 같다. `from_firefox()`
 함수 자체는 남아 있어(macOS/Linux, 또는 명시적 직접 호출) 다른 OS에서는 계속 쓰인다.
 
-- **수동 우회**: `INNO_CREED_AUTH_TOKEN`(=`BIZCUBE_AT`) + `INNO_CREED_SIGN_KEY`(=`BIZCUBE_HK`) 환경변수를 모두 지정하면 브라우저 읽기를 건너뛰고 그 값을 사용(모든 경로보다 우선). 모든 OS·브라우저 우회.
-- **만료**: 401 감지 시 재취득(만료 주기 미관측 — 열린 질문).
+### 취득 순서와 진단
+
+- **순서**: `환경변수` → `익스텐션 캐시` → `Chrome` → `Edge`(Windows) → `Firefox`(비-Windows) →
+  `크레덴셜 파일`(`~/.config/inno-creed/creds.json`, `inno-creed auth set`이 씀). 먼저 성공하는
+  것을 쓰고 나머지는 시도하지 않는다. 목록의 정본은 `creds::sources()`이고,
+  `source_names()`가 그것을 `doctor`·`auth set` 안내 문구에 공급한다 — **순서를 문서와 코드에
+  두 번 적지 않으려는 것이다.**
+  - **수동 우회(env)**: `INNO_CREED_AUTH_TOKEN`(=`BIZCUBE_AT`) + `INNO_CREED_SIGN_KEY`(=`BIZCUBE_HK`)를
+    **둘 다** 지정하면 브라우저 읽기를 건너뛴다. 모든 OS·브라우저 우회.
+  - **파일이 맨 아래인 이유**: 위에 두면 만료된 `creds.json` 하나가 멀쩡한 브라우저 세션을 영영
+    가린다(env가 가진 병 그대로 — 재취득해도 같은 값이 돌아온다). 아래에 두면 나머지가 **실패할
+    때만** 쓰이고, 파일을 쓰는 이유가 애초에 "다른 데서 못 가져온다"이므로 이 순서로 충분하다.
+  - 단, **env는 파일보다 위**라 둘을 같이 두면 파일을 새로 저장해도 안 먹는다. `doctor`가 이
+    조합을 경고한다.
+- **진단은 한 곳에서만 만든다**: `creds::diagnose()`가 소스별 결과(`Outcome::{Ok,Absent,Failed}`)를
+  돌려주고, **최종 에러 문구와 `inno-creed doctor`가 그것을 공유한다.** 따로 구현하면 "doctor는
+  OK인데 서버는 실패"처럼 어긋난다. `Absent`(브라우저 미설치 등 처방 없는 것)는 최종 에러에서
+  이름만 한 줄로 강등해, 손댈 곳 하나가 묻히지 않게 한다.
+- **만료**: 401 감지 시 재취득(만료 주기 미관측 — 열린 질문). 익스텐션·브라우저·파일 경로는
+  재취득이 같은 경로를 다시 읽으므로 클라이언트 재시작이 필요 없다. **env만 재시작이 필요하다** —
+  재취득해도 같은 값이 돌아온다.
 - 임시 파일(복사한 쿠키 DB)은 사용 후 삭제.
 
 ## 4. authToken 구조 & 세션 정보 (lazy 취득 + TTL 캐시)

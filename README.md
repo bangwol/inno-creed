@@ -150,18 +150,35 @@ Chrome은 **Device Bound Session Credentials(DBSC)**를 2026년 4월(Chrome 146,
 | `INNO_CREED_EDGE_COOKIES` | Edge `Cookies` DB 파일 경로(직접, Windows 전용) |
 | `INNO_CREED_EDGE_USER_DATA` | Edge `User Data` 루트(Windows 전용) |
 
-크레덴셜 취득에 실패하면 에러 메시지에 **어떤 경로를 확인했는지**가 표시되니, 그 경로를 보고 위 환경변수로 실제 위치를 지정하면 됩니다.
+크레덴셜 취득에 실패하면 에러 메시지에 **어느 소스가 왜 막혔는지**가 처방과 함께 표시됩니다. 한 화면으로 보려면:
+
+```sh
+inno-creed doctor
+```
+
+크레덴셜 소스별 결과, 익스텐션 브릿지·크레덴셜 파일·Claude Desktop 설정 파일의 실제 위치, 그리고 **실제로 인증이 되는지**(gw에 1회 요청)까지 확인합니다. 토큰 값은 출력하지 않습니다.
 
 ### 크레덴셜 직접 지정 (수동)
 
-브라우저 복호화가 불가한 환경(예: **Windows 최신 Chrome app-bound**, Chrome을 못 닫는 상황)에서는 쿠키 값을 **직접 지정**하면 브라우저 읽기를 완전히 건너뜁니다. 다른 모든 경로보다 우선합니다.
+확장 프로그램도 브라우저 읽기도 안 되는 환경(**세션 쿠키**라 디스크에 안 남는 경우, **Windows Chrome/Edge app-bound**, 개발자 모드가 막혀 확장을 못 까는 경우)의 **최후 수단**입니다. DevTools → Application → Cookies → `gw.innogrid.com`에서 `BIZCUBE_AT`·`BIZCUBE_HK`를 복사해:
 
-| 환경변수 | 값 (브라우저 DevTools → Application → Cookies → `gw.innogrid.com`) |
+```sh
+inno-creed auth set      # 두 값을 물어보고 ~/.config/inno-creed/creds.json에 저장(unix는 0600)
+inno-creed auth clear    # 저장된 값 삭제
+```
+
+인자가 아니라 **stdin으로만** 받습니다 — 인자로 주면 셸 히스토리와 프로세스 목록에 세션 토큰이 남습니다.
+
+환경변수로도 됩니다(둘 **모두** 설정해야 사용):
+
+| 환경변수 | 값 |
 |---|---|
 | `INNO_CREED_AUTH_TOKEN` | `BIZCUBE_AT` 쿠키 값 (URL 인코딩된 `%7C`도 그대로 붙여넣기 가능) |
 | `INNO_CREED_SIGN_KEY` | `BIZCUBE_HK` 쿠키 값 |
 
-두 값이 **모두** 설정돼 있어야 사용됩니다. MCP 클라이언트로 실행할 땐 등록 설정의 `env` 블록에 넣으세요(셸 `export`는 전달되지 않음).
+MCP 클라이언트로 실행할 땐 등록 설정의 `env` 블록에 넣으세요(셸 `export`는 전달되지 않음).
+
+**취득 순서는 `환경변수` → `익스텐션 캐시` → `Chrome` → `Edge`(Windows) → `Firefox`(비-Windows) → `크레덴셜 파일`입니다.** 파일이 맨 아래인 것은 의도적입니다 — 위에 두면 만료된 파일 하나가 멀쩡한 브라우저 세션을 영영 가립니다. 반대로 `env`는 파일보다 위라, 둘을 같이 두면 `auth set`으로 새로 저장해도 안 먹습니다(`doctor`가 이 조합을 경고합니다).
 
 ## 설치
 

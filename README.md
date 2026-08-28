@@ -237,6 +237,8 @@ claude mcp add inno-creed -- /절대경로/inno-creed        # Windows는 ...\in
 
 등록 후 클라이언트를 재시작하면 도구가 노출됩니다. macOS에서 Chrome 크레덴셜을 쓸 경우 첫 실행 시 키체인(`Chrome Safe Storage`) 접근 허용 프롬프트가 한 번 뜹니다.
 
+**막히면 `inno-creed doctor`를 먼저 실행하세요.** 어느 크레덴셜 소스에서 왜 막혔는지, 설정 파일이 실제로 어디 있는지, 그리고 **실제로 인증이 되는지**까지 한 화면에 보여줍니다(토큰 값은 출력하지 않습니다). 도구 목록이 뜨는 것과 인증 성공은 별개입니다 — 서버는 크레덴셜이 없어도 기동합니다.
+
 > **HTTP 전송은 정식 지원하지 않습니다.** 이 서버는 로그인을 받지 않고 **서버가 도는 머신의 브라우저 쿠키**로 동작하므로, 포트를 여는 순간 거기 닿는 누구나 당신 이름으로 결재를 상신하고(`submit_approval` — 결재선에 실제 알림이 갑니다) 메일을 보내고 근태를 찍을 수 있습니다. 그래서 배포 바이너리에 넣지 않았습니다.
 > stdio를 쓸 수 없는 **로컬** 클라이언트 때문에 꼭 필요하다면, 직접 빌드하는 절차를 [`docs/HTTP.md`](docs/HTTP.md)에 적어두었습니다 — 기존 코드 수정 없이 의존성 2줄과 바이너리 1개면 됩니다. 원격 노출·공용 서버 상주는 하지 마세요.
 
@@ -244,7 +246,9 @@ claude mcp add inno-creed -- /절대경로/inno-creed        # Windows는 ...\in
 
 ```
 inno-creed (Rust MCP 서버, 헤드리스)
- ├─ creds    확장 프로그램 캐시(권장) → Chrome → Edge(Win) → Firefox 폴백 → authToken / signKey
+ ├─ creds    환경변수 → 확장 프로그램 캐시(권장) → Chrome → Edge(Win) → Firefox(비-Win)
+ │           → 크레덴셜 파일 → authToken / signKey. 소스별 실패 사유는 diagnose()가 한 곳에서 만든다
+ ├─ doctor   `inno-creed doctor` — 위 진단 + 설정 파일 탐색 + 실제 인증 왕복 1회
  ├─ native_host  Chrome/Edge 확장 프로그램(`extension/`)의 Native Messaging 수신 — 1회성
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
  ├─ util     도메인 무관 순수 함수(날짜 변환 · JSON 필드 추출)

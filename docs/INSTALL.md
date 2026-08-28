@@ -113,7 +113,7 @@ claude mcp add inno-creed --scope user -- /절대경로/inno-creed          # Wi
 
 ## 4. 크레덴셜 연결 — Chrome/Edge 확장 프로그램 (Windows 권장)
 
-`gw.innogrid.com`의 로그인 쿠키(`BIZCUBE_AT`/`BIZCUBE_HK`)는 **세션 쿠키**라 브라우저가 켜져 있는 동안만 존재합니다. Windows Chrome/Edge는 여기에 더해 실행 중 쿠키 파일을 배타 잠금 걸고, `v20` app-bound 암호화도 제3자 프로세스로는 설계상 항상 거부합니다 — 쿠키 DB 파일을 직접 읽는 방식(5번 문제 해결 참고)은 이 조합을 다 뚫어야 하는 데다 [DBSC](#dbsc란-쿠키-db-직접-읽기가-왜-점점-막히나) 때문에 갈수록 막힙니다. **Windows에서는 Chrome/Edge 확장 프로그램을 쓰세요** — 브라우저가 공식으로 열어준 `cookies` API로 평문 값을 바로 받아 이 문제들을 전부 우회합니다.
+`gw.innogrid.com`의 로그인 쿠키(`BIZCUBE_AT`/`BIZCUBE_HK`)는 **세션 쿠키**라 브라우저가 켜져 있는 동안만 존재합니다. Windows Chrome/Edge는 여기에 더해 실행 중 쿠키 파일을 배타 잠금 걸고, `v20` app-bound 암호화도 제3자 프로세스로는 설계상 항상 거부합니다 — 쿠키 DB 파일을 직접 읽는 방식([6번 문제 해결](#6-크레덴셜이-안-잡힐-때-문제-해결) 참고)은 이 조합을 다 뚫어야 하는 데다 [DBSC](#dbsc란--쿠키-db-직접-읽기가-왜-점점-막히나) 때문에 갈수록 막힙니다. **Windows에서는 Chrome/Edge 확장 프로그램을 쓰세요** — 브라우저가 공식으로 열어준 `cookies` API로 평문 값을 바로 받아 이 문제들을 전부 우회합니다.
 
 1. Native messaging host를 등록합니다(최초 1회):
    ```sh

@@ -8,5 +8,6 @@ pub mod creds;
 pub mod error;
 pub mod mcp;
 pub mod modules;
+pub mod native_host;
 pub mod sign;
 pub mod util;

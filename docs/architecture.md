@@ -14,7 +14,8 @@
 
 ```
 inno-creed (Rust MCP 서버, 헤드리스)
- ├─ creds    크레덴셜 취득: Chrome 쿠키 복호화 → authToken / signKey
+ ├─ creds       크레덴셜 취득: 익스텐션 캐시(권장) → Chrome → Edge(Win) → Firefox(비-Win) → authToken / signKey
+ ├─ native_host Chrome/Edge 확장 프로그램(`extension/`)의 Native Messaging 수신 — 1회성
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
  ├─ util     도메인 무관 순수 함수(날짜 days_to_ymd/fmt_ymd · digits_only · JSON 필드 추출 json_str/s)
  ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 사원 명부 캐시(30분 TTL) · 본인 표시정보 캐시(30분 TTL) · signed()로 헤더 4종 주입 · 전송 · 응답봉투 파싱 · companyInfo 조립
@@ -29,37 +30,74 @@ inno-creed (Rust MCP 서버, 헤드리스)
 ```
 
 - 구조 근거: MCP는 **실행층**, 크레덴셜만 외부(브라우저)에서 취득. 그래서 헤드리스로 돌아간다.
-- 서버 시작 순서: `creds::from_browser()`(크레덴셜 — Chrome → Firefox 폴백) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
+- 서버 시작 순서: `creds::from_browser()`(크레덴셜 — 익스텐션 캐시 → Chrome → Edge(Win) → Firefox(비-Win)) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).
 - 소스: `src/{creds,sign,util,client,error}.rs`, `src/modules/*.rs`, `src/mcp/{mod.rs,tools/,args/}`. 빌드 타깃은 `src/main.rs`(MCP 서버)와 `src/bin/probe.rs`(디버그 REPL — 임의 엔드포인트를 서명 호출) 둘.
 - **도구 라우터 합성**: 도메인마다 `#[tool_router(router = <도메인>_router, vis = "pub(crate)")]`로 라우터를 만들고 `Amaranth::all_tools()`가 `ToolRouter`의 `Add`로 합친다. `#[tool_handler(router = Self::all_tools())]`로 경로를 명시한다 — 핸들러는 라우터를 **필드로 갖지 않는다**(매크로가 호출 때마다 표현식을 평가하므로 필드에 담아도 읽히지 않는다).
 - **모듈 함수 시그니처 규약**: 첫 인자는 `c: &GwClient`. 예외는 `org::roster`/`org::find_person` 둘뿐이며 `&Arc<GwClient>`를 받는다 — 부서를 `JoinSet`으로 병렬 순회하는데 `spawn`이 `'static`을 요구하고 `GwClient`는 `RwLock` 보유로 `Clone`이 아니기 때문이다. 대안(신규 의존성/역할 분담 붕괴/직렬화)이 전부 대가가 커서 **의도적으로 예외를 유지**한다. 새 함수는 `&GwClient`를 쓸 것(상세: `src/modules/org.rs` 헤더 주석).
 - **파생 조회**: 일부 도구는 단일 API 래퍼가 아니라 여러 호출을 조합해 서버측에서 계산을 끝낸다 — `find_free_rooms`(자원 목록+예약을 인터벌 연산), `find_person`(부서 전수 순회 후 캐시), `my_reservations`·`pending_approvals`(필터+요약). LLM이 매 호출마다 같은 다단 조합을 반복하지 않게 하려는 것.
 
-## 3. 크레덴셜 취득 (Chrome / Firefox · macOS·Linux·Windows)
+## 3. 크레덴셜 취득 (익스텐션 · Chrome/Edge · Firefox · macOS·Linux·Windows)
 
-Chrome 또는 Firefox가 `gw.innogrid.com`에 저장한 쿠키에서 두 값을 뽑는다(`src/creds.rs`):
+`gw.innogrid.com`이 발급하는 두 쿠키에서 값을 뽑는다(`src/creds.rs`):
 
 | 쿠키 | 용도 | 후처리 |
 |---|---|---|
 | `BIZCUBE_AT` | `authToken` | URL 디코드(`%7C`→`|`) |
 | `BIZCUBE_HK` | `signKey` | 그대로 |
 
-**Chrome** — 쿠키 DB(SQLite, `WHERE host_key='gw.innogrid.com'`)의 `encrypted_value`를 OS별로 복호화:
+`from_browser()`의 순서: 수동 지정(env) → **익스텐션 캐시**(권장) → Chrome → Edge(Windows만) →
+Firefox(**Windows에서는 시도 안 함** — 아래 참고). 첫 성공에서 멈춘다.
+
+### 익스텐션 캐시(Chrome/Edge, `extension/` + `src/native_host.rs`)
+
+`BIZCUBE_AT`/`BIZCUBE_HK`는 **세션 쿠키**(만료시간 없음)라 브라우저가 켜져 있는 동안만 존재한다.
+아래 쿠키 DB 직접 읽기 경로는 이 성질과 Windows의 파일잠금·`v20` 암호화가 겹쳐 사실상 항상
+실패한다(실증됨). 확장 프로그램은 브라우저가 공식으로 제공하는 `chrome.cookies` API로 평문
+값을 직접 받아 이 문제 자체를 우회한다.
+
+- 흐름: 익스텐션이 `chrome.cookies.onChanged`로 두 쿠키를 감지 → `chrome.cookies.getAll({domain})`
+  으로 읽음(`.get({url,name})`은 쿠키 `Path`가 `/`가 아니면 조용히 실패해서 안 씀) →
+  Native Messaging(`connectNative`, 1회성 — `sendNativeMessage`는 MV3 서비스워커가 native
+  host 스폰 중 유휴 종료되면 콜백이 유실되는 걸 실측 확인해서 안 씀)으로 `inno-creed
+  --native-host`(브라우저가 직접 스폰, 인자는 `chrome-extension://<id>/`이지 우리가 정한
+  플래그가 아님 — `main.rs`가 이 접두도 native-host 모드로 인식)를 호출 → 로컬 캐시 파일
+  (`extension_cache_path()`, OS별 표준 로컬 데이터 디렉토리, `INNO_CREED_EXTENSION_CACHE`로
+  오버라이드)에 씀 → `from_extension_cache()`가 매 취득마다 그 파일을 읽음.
+- 등록: `inno-creed --install-extension-host [확장ID]`가 native messaging host 매니페스트를
+  쓰고 Chrome/Edge 레지스트리 하이브 둘 다(`HKCU\Software\{Google\Chrome,Microsoft\Edge}\NativeMessagingHosts`)
+  에 등록(Windows만 구현). 확장 ID는 `extension/manifest.json`의 `"key"`(고정 공개키)로
+  결정되므로 unpacked로 재로드해도 안 바뀐다.
+- 로그아웃(쿠키 삭제) 감지 시 캐시 파일도 지운다(익스텐션이 `{clear:true}` 메시지 전송) —
+  안 지우면 만료된 값으로 계속 "성공"해서 나중에 API 401로 더 헷갈리는 실패가 난다.
+
+### Chrome/Edge 쿠키 DB 직접 읽기 (폴백, best-effort)
+
+쿠키 DB(SQLite, `WHERE host_key='gw.innogrid.com'`)의 `encrypted_value`를 OS별로 복호화:
 
 | OS | 복호화 키 | 알고리즘 |
 |---|---|---|
 | macOS | 키체인 `security find-generic-password -s "Chrome Safe Storage"` → PBKDF2-HMAC-SHA1(1003, 16B) | AES-128-CBC(iv=0x20×16, Pkcs7) |
 | Linux | 키링(`v11`): `secret-tool`로 `Chrome Safe Storage` 비밀 조회 → PBKDF2-HMAC-SHA1(1, 16B). 키링 미사용(`v10`): 고정 비번 `"peanuts"` | AES-128-CBC(iv=0x20×16, Pkcs7) |
-| Windows | `v10`: `os_crypt.encrypted_key`(base64, `DPAPI` 접두) → `CryptUnprotectData`로 32B 키. `v20`(app-bound): `os_crypt.app_bound_encrypted_key`(`APPB` 접두) → Chrome Elevator COM `IElevator::DecryptData` → 끝 32B 키 | AES-256-GCM(nonce 12B + tag 16B) |
+| Windows | `v10`만: `os_crypt.encrypted_key`(base64, `DPAPI` 접두) → `CryptUnprotectData`로 32B 키. `v20`(app-bound)은 **시도하지 않는다** — 호출자 프로세스 경로를 검증해 제3자 프로세스는 설계상 항상 거부됨을 실증함(Edge COM 직접 호출로 재현, `hr=0x8004B016 last_error=5`) | AES-256-GCM(nonce 12B + tag 16B) |
 
-- 공통: `encrypted_value` 앞 **3바이트 버전 프리픽스(`v10`/`v20`) 제거**(Windows는 접두로 `v10`↔`v20` 키 선택). 최신 Chrome은 평문 앞에 **32B 도메인 SHA256**을 붙이므로 UTF-8 파싱 실패 시 앞 32B 제거.
-- 쿠키 DB 경로: 신버전 `Default/Network/Cookies` → 구버전 `Default/Cookies` 폴백. User Data 루트는 OS별(mac `~/Library/…`, linux `~/.config/google-chrome`, win `%LOCALAPPDATA%\Google\Chrome\User Data`).
+- 공통: `encrypted_value` 앞 **3바이트 버전 프리픽스(`v10`/`v20`) 제거**. 최신 Chrome은 평문 앞에 **32B 도메인 SHA256**을 붙이므로 UTF-8 파싱 실패 시 앞 32B 제거.
+- 쿠키 DB 경로: 신버전 `Default/Network/Cookies` → 구버전 `Default/Cookies` 폴백. User Data 루트는 OS별(mac `~/Library/…`, linux `~/.config/google-chrome`, win `%LOCALAPPDATA%\Google\Chrome\User Data`, Edge는 `%LOCALAPPDATA%\Microsoft\Edge\User Data`).
+- Windows에서는 `BIZCUBE_AT`/`HK`가 전부 `v20`이라 이 경로로는 사실상 항상 실패한다 — 위 익스텐션 캐시가 실질적 경로.
 
-**Firefox** — `cookies.sqlite`(`moz_cookies`)가 **평문**이라 복호화 없이 읽는다. 프로필 루트만 OS별(mac `~/Library/…/Firefox/Profiles`, linux `~/.mozilla/firefox`, win `%APPDATA%\Mozilla\Firefox\Profiles`)로 분기, `*.default*` 프로필 우선. Chrome 실패 시 폴백.
+### Firefox (macOS/Linux만 — Windows는 미지원)
 
-- **취약 경로**: Windows 최신 Chrome은 실행 중 쿠키 파일을 **배타적으로 잠가** 복사 불가(Chrome 종료 필요). `v20` app-bound는 Elevator COM으로 시도하나 Chrome이 호출자를 거부할 수 있음(best-effort). 실패 시 Firefox 폴백.
+`cookies.sqlite`(`moz_cookies`)가 **평문**이라 복호화 없이 읽는다. 프로필 루트만 OS별(mac
+`~/Library/…/Firefox/Profiles`, linux `~/.mozilla/firefox`, win `%APPDATA%\Mozilla\Firefox\Profiles`)
+로 분기, `*.default*` 프로필 우선.
+
+**Windows에서는 `from_browser()`가 Firefox를 아예 호출하지 않는다** — `BIZCUBE_AT`/`HK`가
+세션 쿠키라 Firefox가 브라우저 실행 중엔 `cookies.sqlite`에 아예 쓰지 않는 걸 실증함(WAL
+사이드카까지 포함해 라이브로 직접 읽어도 해당 행이 없음, `mode=ro` URI로 복사 경합 가능성도
+배제). Chrome/Edge의 파일잠금·`v20`과는 다른 메커니즘이지만 결과는 같다. `from_firefox()`
+함수 자체는 남아 있어(macOS/Linux, 또는 명시적 직접 호출) 다른 OS에서는 계속 쓰인다.
+
 - **수동 우회**: `INNO_CREED_AUTH_TOKEN`(=`BIZCUBE_AT`) + `INNO_CREED_SIGN_KEY`(=`BIZCUBE_HK`) 환경변수를 모두 지정하면 브라우저 읽기를 건너뛰고 그 값을 사용(모든 경로보다 우선). 모든 OS·브라우저 우회.
-- **만료**: 401 감지 시 쿠키 재복호화로 재취득(만료 주기 미관측 — 열린 질문).
+- **만료**: 401 감지 시 재취득(만료 주기 미관측 — 열린 질문).
 - 임시 파일(복사한 쿠키 DB)은 사용 후 삭제.
 
 ## 4. authToken 구조 & 세션 정보 (lazy 취득 + TTL 캐시)

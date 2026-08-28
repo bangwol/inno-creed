@@ -1,0 +1,14 @@
+{
+  "name": "inno-creed-extension",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "build": "bun build src/background.ts --outfile=background.js --target=browser --format=esm",
+    "watch": "bun build src/background.ts --outfile=background.js --target=browser --format=esm --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.280",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/inno-creed.jpg" width="400" alt="Inno Creed — 이노그리드 아마란스 MCP">
+  <img src="assets/inno-creed-v2.jpg" width="400" alt="Inno Creed — 이노그리드 아마란스 MCP">
 </p>
 
 <h1 align="center">inno-creed</h1>
@@ -103,19 +103,38 @@
 
 ## 요구 사항
 
-- **macOS · Linux · Windows** — Chrome/Firefox 쿠키에서 크레덴셜(`authToken`/`signKey`)을 가져옵니다. 쿠키 복호화 방식이 OS마다 달라 각각에 맞게 처리합니다.
-- **Chrome 또는 Firefox로 `https://gw.innogrid.com` 에 로그인된 상태** — 세션이 없으면 도구 호출 시 로그인 안내를 반환합니다.
+- **macOS · Linux · Windows** — 크레덴셜(`authToken`/`signKey`)을 가져오는 경로가 두 가지입니다: **Chrome/Edge 확장 프로그램**(권장) 또는 **브라우저 쿠키 직접 읽기**(폴백, OS마다 방식이 다름).
+- **Chrome/Edge 또는 Firefox로 `https://gw.innogrid.com` 에 로그인된 상태** — 세션이 없으면 도구 호출 시 로그인 안내를 반환합니다.
+
+### 권장 경로: Chrome/Edge 확장 프로그램
+
+`gw.innogrid.com`의 로그인 쿠키(`BIZCUBE_AT`/`BIZCUBE_HK`)는 **세션 쿠키**라 브라우저가 켜져 있는 동안만 존재하고, Windows에서는 추가로 파일 잠금·`v20` app-bound 암호화까지 겹칩니다. 쿠키 DB 파일을 직접 읽는 방식은 이 조합을 다 통과해야 하는 데다, 아래([DBSC](#️-쿠키-db-직접-읽기는-점점-막히는-경로입니다-dbsc)) 이유로 점점 더 막히는 추세입니다. 확장 프로그램은 브라우저가 공식으로 열어준 `cookies` API로 평문 값을 바로 읽어 Native Messaging(로컬 프로세스 스폰 + stdio, 소켓 불필요)으로 inno-creed에 전달하므로 이 문제들을 전부 우회합니다.
+
+```sh
+inno-creed --install-extension-host   # native messaging host 등록(최초 1회)
+```
+
+이후 `chrome://extensions`(또는 `edge://extensions`) → **개발자 모드** 켜기 → **압축해제된 확장 프로그램 로드** → 이 저장소의 `extension/` 폴더 선택. 로드 시점에 이미 로그인돼 있으면 즉시, 이후로는 로그인·로그아웃할 때마다 자동으로 동기화됩니다. 자세한 절차는 [`docs/INSTALL.md`](docs/INSTALL.md) 참고.
+
+### ⚠️ 쿠키 DB 직접 읽기는 점점 막히는 경로입니다 (DBSC)
+
+Chrome은 **Device Bound Session Credentials(DBSC)**를 2026년 4월(Chrome 146, Windows) GA로 켜서 세션 쿠키를 기기에 암호학적으로 묶어, 브라우저 프로세스 밖에서 파일·COM으로 훔쳐 쓰는 걸 막고 있습니다(관리자 설정으로도 못 끔). Edge도 같은 Chromium 기반이라 뒤따를 걸로 보입니다(2025년 10월 Origin Trial 종료, GA는 아직 미발표). **지금은 운 좋게 되더라도, 쿠키 DB 직접 복호화 경로는 가까운 미래에 완전히 막힐 걸 전제로 쓰세요.** 확장 프로그램 경로는 DBSC와 무관합니다 — 브라우저 자신의 공식 `cookies` API를 그대로 쓰므로, DBSC가 막으려는 "브라우저 밖에서 훔쳐 쓰기"에 애초에 해당하지 않습니다.
+
+**Firefox는 DBSC를 공식적으로 도입하지 않기로 했습니다** — Mozilla `standards-positions` 저장소에 `position: negative`로 명시돼 있고, 이유는 (1) 훔친 쿠키가 재인증 전까지는 여전히 쓸 수 있는 창이 남는다, (2) 애드혹 재인증 프로토콜이 기존 쿠키 관리 방식과 안 맞는다, (3) 향후 하드웨어 attestation 요구로 이어질 수 있다는 것입니다. 다만 이건 "DBSC로 안 막힌다"일 뿐, `gw.innogrid.com`이 되는 건 별개입니다 — `BIZCUBE_AT`/`HK`는 세션 쿠키라 **Firefox도 브라우저가 켜져 있는 동안은 `cookies.sqlite`에 아예 쓰지 않는다**는 걸 실측으로 확인했습니다(WAL 파일까지 포함해 라이브로 직접 읽어도 로그인 상태의 쿠키가 DB에 없음). 즉 Firefox는 DBSC와 무관한 이유로 이 사이트에서는 파일 기반 읽기가 원래 안 됩니다.
 
 ### 플랫폼별 크레덴셜 지원
 
 | | macOS | Linux | Windows |
 |---|---|---|---|
-| **Chrome** | 키체인 `Chrome Safe Storage` → AES-128-CBC | 키링(`v11`, `secret-tool`) / `"peanuts"`(`v10`) → AES-128-CBC | `v10` DPAPI 키 / `v20` app-bound(Chrome Elevator COM) → AES-256-GCM |
-| **Firefox** | ✅ (쿠키 평문) | ✅ | ✅ |
+| **Chrome/Edge 확장 프로그램(권장)** | 미구현(`--install-extension-host` Windows 전용) | 〃 | ✅ |
+| **Chrome 쿠키 직접 읽기** | 키체인 `Chrome Safe Storage` → AES-128-CBC | 키링(`v11`, `secret-tool`) / `"peanuts"`(`v10`) → AES-128-CBC | `v10` DPAPI만 됨. `v20` app-bound는 경로 검증 때문에 제3자 프로세스로는 **설계상 항상 거부** |
+| **Edge 쿠키 직접 읽기** | — | — | Chrome과 동일(`v20`은 항상 거부) |
+| **Firefox 쿠키 직접 읽기** | ✅ (쿠키 평문) | ✅ | **미지원** — 이 사이트의 세션 쿠키를 실행 중엔 디스크에 안 써서 시도 자체를 안 함 |
 
-- **Firefox가 가장 확실한 크로스플랫폼 경로**입니다(쿠키가 평문이라 OS 무관). Chrome이 안 잡히면 Firefox로 `gw.innogrid.com`에 로그인하면 됩니다.
-- **Windows Chrome 주의**: 최신 Chrome은 실행 중 쿠키 파일을 **배타적으로 잠급니다**. Chrome을 **완전히 종료**한 뒤 실행해야 쿠키를 읽을 수 있습니다. `v20` app-bound 쿠키는 Chrome Elevator COM으로 복호화를 시도하지만(best-effort) Chrome 버전/보안설정에 따라 거부될 수 있습니다.
-- **어떤 브라우저에서도 못 가져오면** 값을 직접 지정할 수 있습니다(아래 [크레덴셜 직접 지정](#크레덴셜-직접-지정-수동)).
+- **Windows에서 가장 확실한 경로는 Chrome/Edge 확장 프로그램**입니다. 세션쿠키·파일잠금·`v20` 암호화 문제를 전부 우회합니다.
+- **macOS/Linux는 아직 확장 프로그램 자동 등록을 안 만들었습니다**(코드 자체는 크로스플랫폼이지만 `--install-extension-host`가 Windows 레지스트리만 건드림) — 그쪽은 브라우저가 이 정도로 강하게 잠그지 않아 지금은 쿠키 직접 읽기로도 잘 됩니다.
+- **Windows Firefox는 지원하지 않기로 확정했습니다** — 파일 기반 읽기가 원천적으로 안 되고(위 DBSC 섹션), Firefox 확장 프로그램은 Mozilla AMO 서명 없이는 Chrome/Edge처럼 "압축해제 로드"로 못 깔아서 손쉬운 우회책도 없습니다. Windows는 Chrome/Edge 확장 프로그램을 쓰세요.
+- **어떤 경로로도 못 가져오면** 값을 직접 지정할 수 있습니다(아래 [크레덴셜 직접 지정](#크레덴셜-직접-지정-수동)).
 
 ### 브라우저 경로 오버라이드 (snap/flatpak/커스텀 프로필)
 
@@ -123,12 +142,15 @@
 
 | 환경변수 | 용도 |
 |---|---|
+| `INNO_CREED_EXTENSION_CACHE` | 확장 프로그램 캐시 파일 경로(직접) — 기본값은 OS별 표준 로컬 데이터 디렉토리 |
 | `INNO_CREED_FIREFOX_COOKIES` | Firefox `cookies.sqlite` 파일 경로(직접) |
 | `INNO_CREED_FIREFOX_DIR` | Firefox 프로필 **디렉토리**(스캔) |
 | `INNO_CREED_CHROME_COOKIES` | Chrome `Cookies` DB 파일 경로(직접) |
 | `INNO_CREED_CHROME_USER_DATA` | Chrome `User Data` 루트 |
+| `INNO_CREED_EDGE_COOKIES` | Edge `Cookies` DB 파일 경로(직접, Windows 전용) |
+| `INNO_CREED_EDGE_USER_DATA` | Edge `User Data` 루트(Windows 전용) |
 
-크레덴셜 취득에 실패하면 에러 메시지에 **Chrome/Firefox 각각 어떤 경로를 확인했는지**가 표시되니, 그 경로를 보고 위 환경변수로 실제 위치를 지정하면 됩니다. (쿠키는 있는데 복호화만 실패하면 키링/app-bound 안내가 함께 나옵니다.)
+크레덴셜 취득에 실패하면 에러 메시지에 **어떤 경로를 확인했는지**가 표시되니, 그 경로를 보고 위 환경변수로 실제 위치를 지정하면 됩니다.
 
 ### 크레덴셜 직접 지정 (수동)
 
@@ -205,7 +227,8 @@ claude mcp add inno-creed -- /절대경로/inno-creed        # Windows는 ...\in
 
 ```
 inno-creed (Rust MCP 서버, 헤드리스)
- ├─ creds    Chrome 쿠키 복호화(→ Firefox 폴백) → authToken / signKey
+ ├─ creds    확장 프로그램 캐시(권장) → Chrome → Edge(Win) → Firefox 폴백 → authToken / signKey
+ ├─ native_host  Chrome/Edge 확장 프로그램(`extension/`)의 Native Messaging 수신 — 1회성
  ├─ sign     wehago-sign(HMAC-SHA256) · transaction-id 생성
  ├─ util     도메인 무관 순수 함수(날짜 변환 · JSON 필드 추출)
  ├─ client   세션 lazy 취득(10분 TTL 캐시) · 헤더 주입 · POST · 응답 파싱

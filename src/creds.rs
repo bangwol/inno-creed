@@ -1,5 +1,7 @@
-//! 크레덴셜(authToken/signKey) 취득 — 익스텐션 캐시(권장, Windows) → Chrome → Edge(Win) →
-//! Firefox(비-Windows만) 순, macOS·Linux·Windows 크로스플랫폼.
+//! 크레덴셜(authToken/signKey) 취득 — 환경변수 → 익스텐션 캐시(권장, Windows) → Chrome →
+//! Edge(Win) → Firefox(비-Windows만) → 크레덴셜 파일 순, macOS·Linux·Windows 크로스플랫폼.
+//! 어느 소스에서 왜 막혔는지는 `diagnose()` 한 곳에서만 만든다 — 최종 에러 문구와
+//! `doctor`가 그 값 하나를 공유한다(따로 구현하면 "doctor는 OK인데 서버는 실패"가 생긴다).
 //! (Edge는 Windows에서만 시도한다 — Chrome과 같은 Chromium 코드베이스라 DB 스키마·암호화
 //! 방식은 동일하고 User Data 경로만 다르다.)
 //! Chrome/Edge 쿠키 복호화는 OS마다 방식이 다르다:
@@ -77,89 +79,203 @@ impl Drop for TempCopy {
     }
 }
 
-/// 크레덴셜 취득 진입점: 수동 입력(env) → 익스텐션 캐시 → Chrome → Edge → Firefox(비-Windows만)
-/// 순, 모두 실패면 로그인 안내 에러. Windows에서 Firefox를 건너뛰는 이유는 모듈 문서 참고.
-pub fn from_browser() -> Result<Creds> {
-    // 0) 수동 입력 — 브라우저 복호화가 불가한 환경(Windows app-bound v20 등)의 확실한 우회.
-    //    두 값 모두 지정돼 있으면 그대로 사용(authToken은 URL 인코딩 허용).
-    if let (Some(at), Some(hk)) = (
-        env_nonempty("INNO_CREED_AUTH_TOKEN"),
-        env_nonempty("INNO_CREED_SIGN_KEY"),
-    ) {
-        return Ok(Creds {
-            auth_token: url_decode(&at),
-            sign_key: hk,
-        });
-    }
-    // 0.5) 익스텐션 브릿지 캐시 — Chrome/Edge 익스텐션(`extension/`)이 Native Messaging으로
-    //    떨어뜨려둔 값. 쿠키 DB 파일을 안 거치므로 v20 암호화·파일 잠금·세션쿠키 소실
-    //    문제가 전부 없다(자세한 이유는 `native_host.rs` 문서). 설치돼 있으면 가장 신뢰할
-    //    수 있는 경로라 브라우저 직접 읽기보다 먼저 시도한다.
-    let extension_err = match from_extension_cache() {
-        Ok(c) => return Ok(c),
-        Err(e) => format!("{e:#}"),
-    };
-    let chrome_err = match from_chrome() {
-        Ok(c) => return Ok(c),
-        Err(e) => format!("{e:#}"),
-    };
-    // Edge는 Windows에서만 시도한다 — Chrome과 같은 Chromium 코드베이스라 이 플랫폼에서만
-    // 별도 시도할 가치가 있다(다른 OS의 Edge는 지원 범위 밖).
-    #[cfg(target_os = "windows")]
-    let edge_err: Option<String> = match from_edge() {
-        Ok(c) => return Ok(c),
-        Err(e) => Some(format!("{e:#}")),
-    };
-    #[cfg(not(target_os = "windows"))]
-    let edge_err: Option<String> = None;
-    // Windows에서는 Firefox를 아예 시도하지 않는다 — gw.innogrid.com의 세션 쿠키를 Firefox가
-    // 브라우저 실행 중엔 cookies.sqlite에 쓰지 않는 걸 실측으로 확인했다(DBSC와 무관한 별개
-    // 이유, 모듈 문서 참고). 시도해봐야 항상 실패하는 왕복을 없앤다.
-    #[cfg(not(target_os = "windows"))]
-    let firefox_err: Option<String> = match from_firefox() {
-        Ok(c) => return Ok(c),
-        Err(e) => Some(format!("{e:#}")),
-    };
-    #[cfg(target_os = "windows")]
-    let firefox_err: Option<String> = None;
+// ─────────────────────────── 취득 진단 ───────────────────────────
 
-    let mut msg = format!(
-        "크레덴셜 취득 실패 — gw.innogrid.com에 로그인된 브라우저가 필요합니다.\n\
-         [익스텐션 캐시] {extension_err}\n\
-         [Chrome] {chrome_err}\n"
-    );
-    if let Some(e) = &edge_err {
-        msg.push_str(&format!("[Edge] {e}\n"));
-    }
-    match &firefox_err {
-        Some(e) => msg.push_str(&format!("[Firefox] {e}\n")),
-        None => {
-            #[cfg(target_os = "windows")]
-            msg.push_str("[Firefox] Windows에서는 지원하지 않습니다(세션 쿠키를 브라우저 실행 중엔 디스크에 쓰지 않음 — DBSC와 무관한 별개 이유)\n");
+/// 한 소스를 시도한 결과.
+///
+/// **`Absent`와 `Failed`를 가르는 것이 이 타입의 존재 이유다.** 예전에는 모든 실패를 같은
+/// 무게로 나열해서, Firefox 미설치(`os error 3`)가 "고쳐야 할 두 번째 문제"처럼 보였다.
+/// 처방이 없는 것은 강등해야 사용자가 진짜 문제 하나를 본다.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// 취득 성공.
+    Ok,
+    /// 소스가 애초에 없다(브라우저 미설치·env 미설정·파일 없음). 대응 불필요.
+    Absent(String),
+    /// 소스는 있는데 실패했다 — 사용자가 손댈 곳이 있다. 문구에 **처방**을 담는다.
+    Failed(String),
+}
+
+/// 소스 하나의 시도 기록.
+#[derive(Clone, Debug)]
+pub struct SourceReport {
+    /// 사람이 읽는 이름("환경변수", "익스텐션 캐시", "Chrome", …).
+    pub source: &'static str,
+    pub outcome: Outcome,
+}
+
+/// 취득 전체의 결과. **에러 문구와 `doctor`가 이 값 하나를 공유한다** — 진단을 두 군데에
+/// 따로 구현하면 "doctor는 OK인데 서버는 실패"처럼 서로 어긋나는 순간이 생긴다.
+pub struct Diagnosis {
+    pub creds: Option<Creds>,
+    /// **시도한 순서대로**. 성공하면 그 뒤 소스는 시도하지 않으므로 목록에 없다
+    /// (서버의 실제 동작과 같아야 하므로 일부러 앞질러 보지 않는다).
+    pub reports: Vec<SourceReport>,
+}
+
+/// 소스 시도 실패. `absent`면 잡음(강등), 아니면 처방 대상.
+#[derive(Debug)]
+struct SourceFail {
+    absent: bool,
+    msg: String,
+}
+
+impl SourceFail {
+    fn absent(msg: impl Into<String>) -> Self {
+        Self {
+            absent: true,
+            msg: msg.into(),
         }
     }
+    fn failed(msg: impl Into<String>) -> Self {
+        Self {
+            absent: false,
+            msg: msg.into(),
+        }
+    }
+    fn into_outcome(self) -> Outcome {
+        if self.absent {
+            Outcome::Absent(self.msg)
+        } else {
+            Outcome::Failed(self.msg)
+        }
+    }
+}
+
+/// `anyhow` 에러를 처방 대상 실패로. (내부 헬퍼가 `?`로 올려보내는 잡다한 io/sqlite 오류용.)
+fn failed_from(e: anyhow::Error) -> SourceFail {
+    SourceFail::failed(format!("{e:#}"))
+}
+
+/// 크레덴셜 취득 진입점. 순서는 `diagnose()`가 정한다.
+///
+/// **크레덴셜 파일이 브라우저보다 아래인 이유**: 위에 두면 만료된 `creds.json` 하나가 멀쩡한
+/// 브라우저 세션을 영영 가린다(지금 환경변수가 가진 병 그대로 — `client.rs`의
+/// `reacquire_creds` 주석). 아래에 두면 브라우저가 읽히는 동안은 브라우저가 이기고, 브라우저가
+/// **실패할 때만** 파일이 쓰인다. 파일을 쓰는 이유가 애초에 "브라우저에서 못 가져온다"이므로
+/// 이 순서로 충분하다.
+pub fn from_browser() -> Result<Creds> {
+    let d = diagnose();
+    match d.creds {
+        Some(c) => Ok(c),
+        None => bail!("{}", render_failure(&d.reports)),
+    }
+}
+
+/// 소스 하나를 시도하는 함수.
+type TrySource = fn() -> std::result::Result<Creds, SourceFail>;
+
+/// 시도할 소스를 **플랫폼에 맞게** 순서대로 늘어놓는다.
+///
+/// Edge는 Windows에서만 시도한다(Chrome과 같은 Chromium이라 다른 OS에서 따로 볼 값이 없다).
+/// Firefox는 반대로 **Windows에서만 시도하지 않는다** — `gw.innogrid.com`의 세션 쿠키를
+/// Firefox가 브라우저 실행 중엔 `cookies.sqlite`에 아예 쓰지 않는 걸 실측으로 확인했다
+/// (모듈 문서 참고). 목록에서 통째로 빼지 않고 "해당 없음"으로 남기는 것은, 왜 안 쓰는지를
+/// `doctor`가 말해줄 수 있게 하기 위해서다.
+fn sources() -> Vec<(&'static str, TrySource)> {
+    let mut v: Vec<(&'static str, TrySource)> = vec![
+        ("환경변수", try_env),
+        ("익스텐션 캐시", try_extension_cache),
+        ("Chrome", try_chrome),
+    ];
     #[cfg(target_os = "windows")]
-    msg.push_str(
-        "BIZCUBE_AT/HK는 세션 쿠키라 Chrome/Edge 쿠키 DB를 직접 읽는 방식은 Windows에서 구조적으로\n\
-         안 됩니다(v20 app-bound 암호화가 제3자 프로세스를 항상 거부) — Firefox도 이 사이트에서는\n\
-         지원하지 않습니다. 가장 확실한 두 가지:\n\
-         (1) Chrome/Edge 확장 프로그램(권장): `inno-creed --install-extension-host` 실행 후\n\
-             chrome://extensions(또는 edge://extensions)에서 개발자 모드로 extension/ 폴더를\n\
-             로드하세요. 로그인 즉시 자동으로 전달됩니다.\n\
-         (2) 수동 지정: INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 DevTools→\n\
-             Application→Cookies→gw.innogrid.com에서 복사한 값을 직접 넣으세요.\n\
-         · INNO_CREED_CHROME_COOKIES = <Cookies DB 경로>   (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)\n\
-         · INNO_CREED_EDGE_COOKIES   = <Cookies DB 경로>   (또는 INNO_CREED_EDGE_USER_DATA = <User Data 루트>)\n"
-    );
-    #[cfg(not(target_os = "windows"))]
-    msg.push_str(
-        "해결: Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인한 뒤 다시 실행하세요.\n\
-         비표준 경로(snap/flatpak/커스텀 프로필)는 환경변수로 지정할 수 있습니다:\n\
-         · INNO_CREED_FIREFOX_COOKIES = <cookies.sqlite 경로>   (또는 INNO_CREED_FIREFOX_DIR = <프로필 디렉토리>)\n\
-         · INNO_CREED_CHROME_COOKIES  = <Cookies DB 경로>       (또는 INNO_CREED_CHROME_USER_DATA = <User Data 루트>)\n\
-         그래도 안 되면 INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 쿠키 값을 직접 지정할 수 있습니다.\n"
-    );
-    bail!("{msg}")
+    v.push(("Edge", try_edge));
+    v.push(("Firefox", try_firefox));
+    v.push(("크레덴셜 파일", try_file));
+    v
+}
+
+/// 시도 순서에 놓인 소스 이름들. `doctor`가 "무엇을 어떤 순서로 보는지"를 안내할 때 쓴다 —
+/// **순서를 문서에 따로 적지 않으려는 것이다**(적으면 코드와 어긋난다).
+pub fn source_names() -> Vec<&'static str> {
+    sources().into_iter().map(|(n, _)| n).collect()
+}
+
+/// 소스를 순서대로 시도하며 **기록을 남긴다.** 성공하면 즉시 멈춘다.
+pub fn diagnose() -> Diagnosis {
+    let mut reports = Vec::new();
+    for (source, f) in sources() {
+        match f() {
+            Ok(c) => {
+                reports.push(SourceReport {
+                    source,
+                    outcome: Outcome::Ok,
+                });
+                return Diagnosis {
+                    creds: Some(c),
+                    reports,
+                };
+            }
+            Err(fail) => reports.push(SourceReport {
+                source,
+                outcome: fail.into_outcome(),
+            }),
+        }
+    }
+    Diagnosis {
+        creds: None,
+        reports,
+    }
+}
+
+/// 모두 실패했을 때의 사용자용 문구. **처방이 있는 것을 앞세우고, 없는 것은 한 줄로 강등한다.**
+fn render_failure(reports: &[SourceReport]) -> String {
+    let mut out = String::from("크레덴셜 취득 실패 — gw.innogrid.com 세션을 찾지 못했습니다.");
+    let actionable: Vec<&SourceReport> = reports
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Failed(_)))
+        .collect();
+    for r in &actionable {
+        if let Outcome::Failed(msg) = &r.outcome {
+            out.push_str(&format!("\n  ▸ [{}] {msg}", r.source));
+        }
+    }
+    let absent: Vec<&str> = reports
+        .iter()
+        .filter(|r| matches!(r.outcome, Outcome::Absent(_)))
+        .map(|r| r.source)
+        .collect();
+    if !absent.is_empty() {
+        out.push_str(&format!(
+            "\n  (해당 없음 — 대응 불필요: {})",
+            absent.join(", ")
+        ));
+    }
+    if actionable.is_empty() {
+        #[cfg(target_os = "windows")]
+        out.push_str(
+            "\n  ▸ 크레덴셜 소스가 하나도 없습니다. Chrome/Edge 확장 프로그램을 설치하세요 — \
+             `inno-creed --install-extension-host` 실행 후 chrome://extensions(또는 edge://extensions)에서 \
+             개발자 모드로 extension/ 폴더를 로드하고 https://gw.innogrid.com 에 로그인하면 됩니다.",
+        );
+        #[cfg(not(target_os = "windows"))]
+        out.push_str(
+            "\n  ▸ 크레덴셜 소스가 하나도 없습니다. Chrome 또는 Firefox로 https://gw.innogrid.com 에 로그인하세요.",
+        );
+    }
+    out.push_str("\n\n무엇이 어디서 막혔는지는 `inno-creed doctor`가 한 화면으로 보여줍니다.");
+    out
+}
+
+/// 수동 입력(env) — 브라우저 복호화가 불가한 환경의 확실한 우회.
+/// 두 값 모두 지정돼 있어야 쓴다(authToken은 URL 인코딩 허용).
+fn try_env() -> std::result::Result<Creds, SourceFail> {
+    let at = env_nonempty("INNO_CREED_AUTH_TOKEN");
+    let hk = env_nonempty("INNO_CREED_SIGN_KEY");
+    match (at, hk) {
+        (Some(at), Some(hk)) => Ok(Creds {
+            auth_token: url_decode(&at),
+            sign_key: hk,
+        }),
+        (None, None) => Err(SourceFail::absent("미설정")),
+        // 한쪽만 넣은 것은 **조용히 무시하면 안 된다** — 넣었는데 왜 안 먹는지 알 길이 없다.
+        (Some(_), None) => Err(SourceFail::failed(
+            "INNO_CREED_AUTH_TOKEN만 설정됨 — INNO_CREED_SIGN_KEY(BIZCUBE_HK 값)도 함께 지정해야 사용됩니다.",
+        )),
+        (None, Some(_)) => Err(SourceFail::failed(
+            "INNO_CREED_SIGN_KEY만 설정됨 — INNO_CREED_AUTH_TOKEN(BIZCUBE_AT 값)도 함께 지정해야 사용됩니다.",
+        )),
+    }
 }
 
 // ────────────────────────── 익스텐션 브릿지 캐시 ──────────────────────────
@@ -200,40 +316,122 @@ pub(crate) fn extension_cache_path() -> Result<PathBuf> {
 }
 
 /// 익스텐션이 떨어뜨려둔 캐시 파일에서 크레덴셜 취득.
-fn from_extension_cache() -> Result<Creds> {
-    let path = extension_cache_path()?;
-    let txt = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "익스텐션 캐시 없음: {} — Chrome/Edge 익스텐션 미설치 또는 미로그인(`inno-creed --install-extension-host`로 설치)",
+///
+/// **캐시가 없는 것의 무게는 플랫폼마다 다르다.** Windows에서는 이것이 권장 경로라 없으면
+/// 그 자체가 고쳐야 할 문제지만(→ `Failed`), macOS·Linux에서는 쿠키 DB 직접 읽기가 정상
+/// 동작하므로 익스텐션을 안 깔아도 아무 문제가 없다(→ `Absent`). 후자를 `Failed`로 올리면
+/// 멀쩡한 환경의 최종 에러에 "고칠 것"이 하나 더 있는 것처럼 보인다.
+fn try_extension_cache() -> std::result::Result<Creds, SourceFail> {
+    let path = extension_cache_path().map_err(failed_from)?;
+    let txt = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(target_os = "windows")]
+            return Err(SourceFail::failed(format!(
+                "익스텐션 캐시 없음: {} — Windows에서는 이 경로가 권장 방식입니다. \
+                 `inno-creed --install-extension-host` 실행 후 chrome://extensions(또는 edge://extensions)에서 \
+                 개발자 모드를 켜고 extension/ 폴더를 \"압축해제된 확장 프로그램 로드\"로 올린 다음, \
+                 https://gw.innogrid.com 에 로그인하세요(로그인 즉시 자동 전달).",
+                path.display()
+            )));
+            #[cfg(not(target_os = "windows"))]
+            return Err(SourceFail::absent(format!(
+                "익스텐션 미설치(캐시 없음: {}) — 이 OS에서는 쿠키를 직접 읽을 수 있어 필요하지 않습니다.",
+                path.display()
+            )));
+        }
+        Err(e) => {
+            return Err(SourceFail::failed(format!(
+                "익스텐션 캐시를 읽지 못했습니다({}): {e}",
+                path.display()
+            )));
+        }
+    };
+    // 파일이 **있는데** 못 쓰는 것은 늘 처방 대상이다 — 익스텐션이 절반만 동작한 상태다.
+    let v: serde_json::Value = serde_json::from_str(&txt).map_err(|e| {
+        SourceFail::failed(format!(
+            "익스텐션 캐시 형식 오류({}): {e}. 익스텐션을 제거했다 다시 로드한 뒤 gw.innogrid.com을 새로고침하세요.",
             path.display()
-        )
+        ))
     })?;
-    let v: serde_json::Value = serde_json::from_str(&txt)
-        .with_context(|| format!("익스텐션 캐시 파싱 실패: {}", path.display()))?;
-    let auth_token = v
-        .get("authToken")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .with_context(|| format!("익스텐션 캐시({})에 authToken 없음", path.display()))?;
-    let sign_key = v
-        .get("signKey")
-        .and_then(|x| x.as_str())
-        .filter(|s| !s.is_empty())
-        .with_context(|| format!("익스텐션 캐시({})에 signKey 없음", path.display()))?;
+    let field = |k: &str| -> std::result::Result<String, SourceFail> {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| {
+                SourceFail::failed(format!(
+                    "익스텐션 캐시({})에 {k}이(가) 없습니다 — gw.innogrid.com에 로그인한 뒤 탭을 새로고침하면 다시 전달됩니다.",
+                    path.display()
+                ))
+            })
+    };
     Ok(Creds {
-        auth_token: url_decode(auth_token),
-        sign_key: sign_key.to_string(),
+        auth_token: url_decode(&field("authToken")?),
+        sign_key: field("signKey")?,
     })
 }
 
 // ─────────────────────────────── Chrome ───────────────────────────────
 
-/// Chrome 쿠키에서 크레덴셜 취득(OS별 복호화).
+/// Chrome 쿠키에서 크레덴셜 취득(OS별 복호화). 진단 문구는 `try_chrome`이 만든다.
 pub fn from_chrome() -> Result<Creds> {
-    let db = chrome_cookie_db()?;
-    let cookies = read_cookies_db(&db, "ck")
-        .with_context(|| format!("Chrome 쿠키 DB 읽기 실패: {}", db.display()))?;
-    let key = chrome_key().context("Chrome 복호화 키 취득 실패(mac 키체인/win DPAPI)")?;
+    try_chrome().map_err(|f| anyhow::anyhow!("{}", f.msg))
+}
+
+fn try_chrome() -> std::result::Result<Creds, SourceFail> {
+    let db = match chrome_cookie_db() {
+        Ok(p) => p,
+        Err(e) => {
+            // User Data 루트조차 없으면 Chrome 미설치다 — 처방이 없으니 강등한다.
+            let root_missing = chrome_user_data_dir().map(|r| !r.exists()).unwrap_or(true);
+            return Err(if root_missing {
+                SourceFail::absent("Chrome 미설치(또는 프로필 없음)")
+            } else {
+                SourceFail::failed(format!("{e:#}"))
+            });
+        }
+    };
+    let cookies = read_cookies_db(&db, "ck", "Chrome").map_err(failed_from)?;
+    finish_chromium("Chrome", &db, cookies, chrome_key)
+}
+
+/// `chrome_key()`/`edge_key()`가 돌려주는 키 타입 — OS마다 다르다(win=구조체, 그 외=바이트열).
+/// `finish_chromium`이 Chrome/Edge와 OS를 가로질러 하나의 시그니처로 받으려고 이름을 붙인다.
+#[cfg(target_os = "windows")]
+type ChromeKeyOwned = ChromeKey;
+#[cfg(not(target_os = "windows"))]
+type ChromeKeyOwned = Vec<u8>;
+
+/// Chrome/Edge 공통 마무리 — 쿠키 목록에서 두 값을 뽑고, 실패를 원인별로 가른다.
+///
+/// **키 취득을 클로저로 미루는 이유**: 읽을 쿠키가 있다고 확인한 뒤에 키를 가져와야 한다.
+/// macOS는 그 단계에서 키체인 프롬프트가 뜨는데, 어차피 못 쓸 상황에 사용자를 놀래킬 이유가 없다.
+fn finish_chromium(
+    browser: &str,
+    db: &Path,
+    cookies: Vec<(String, Vec<u8>)>,
+    key: impl FnOnce() -> Result<ChromeKeyOwned>,
+) -> std::result::Result<Creds, SourceFail> {
+    // gw 쿠키가 **하나도 없는 것**과 **있는데 BIZCUBE_AT만 없는 것**은 원인도 처방도 다르다.
+    // 전자만 미로그인이다. 이 구분을 안 해서 세션 쿠키 사용자를 "다시 로그인 → 여전히 실패"
+    // 루프로 보낸 적이 있다.
+    if cookies.is_empty() {
+        let env_hint = if browser == "Edge" {
+            "INNO_CREED_EDGE_COOKIES"
+        } else {
+            "INNO_CREED_CHROME_COOKIES"
+        };
+        return Err(SourceFail::failed(format!(
+            "쿠키 DB({})에 gw.innogrid.com 쿠키가 하나도 없습니다 — 이 프로필로 로그인한 적이 없습니다. \
+             {browser}으로 https://gw.innogrid.com 에 로그인하거나, 다른 프로필을 쓴다면 {env_hint}로 지정하세요.",
+            db.display()
+        )));
+    }
+
+    let key = key()
+        .with_context(|| format!("{browser} 복호화 키 취득 실패(mac 키체인/win DPAPI)"))
+        .map_err(failed_from)?;
 
     let mut auth_token = None;
     let mut sign_key = None;
@@ -253,22 +451,31 @@ pub fn from_chrome() -> Result<Creds> {
     }
     // 쿠키는 있는데 복호화만 실패 → 키 스킴 불일치(키링/app-bound). "없음"과 구분해 안내.
     if auth_token.is_none() && decrypt_failed {
-        bail!(
+        return Err(SourceFail::failed(
             "BIZCUBE 쿠키는 있으나 복호화 실패. Linux 키링(gnome-keyring/kwallet, v11) 사용 시 `secret-tool`(libsecret-tools)이 설치돼 있어야 합니다 — `sudo apt install libsecret-tools` 후 재시도. \
              Windows app-bound(v20)은 호출자 프로세스 경로 검증 때문에 inno-creed 같은 제3자 프로세스로는 설계상 항상 거부됩니다(버전·설정과 무관, 시도조차 안 함). \
-             Windows에서 확실한 방법: `inno-creed --install-extension-host`로 Chrome/Edge 확장 프로그램을 설치하거나, \
-             INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 DevTools에서 복사한 쿠키 값을 직접 지정하세요(Firefox는 이 사이트의 세션 쿠키를 지원하지 않습니다)."
-        );
+             Windows에서 확실한 방법: `inno-creed --install-extension-host`로 Chrome/Edge 확장 프로그램을 설치하거나, `inno-creed auth set`으로 DevTools에서 복사한 쿠키 값을 직접 저장하세요."
+                .to_string(),
+        ));
     }
+    let missing = || SourceFail::failed(missing_at_msg(&db.display().to_string()));
     Ok(Creds {
-        auth_token: auth_token.with_context(|| {
-            format!(
-                "쿠키 DB({})는 읽었으나 BIZCUBE_AT 없음 — 이 프로필로 gw.innogrid.com 로그인이 안 돼 있습니다(다른 프로필이면 INNO_CREED_CHROME_COOKIES로 지정).",
-                db.display()
-            )
-        })?,
-        sign_key: sign_key.context("BIZCUBE_HK 쿠키 없음(로그인 필요)")?,
+        auth_token: auth_token.ok_or_else(missing)?,
+        sign_key: sign_key.ok_or_else(missing)?,
     })
+}
+
+/// gw 쿠키는 있는데 `BIZCUBE_AT`/`BIZCUBE_HK`가 없을 때의 문구.
+///
+/// **원인을 하나로 단정하지 않는다.** 세션 쿠키라 디스크에 안 남은 경우와, 로그아웃해서
+/// 지워진 경우가 둘 다 같은 모습으로 보인다 — 단정하면 예전처럼 또 오진이 된다.
+fn missing_at_msg(where_: &str) -> String {
+    format!(
+        "쿠키 DB({where_})에 gw.innogrid.com 쿠키는 있으나 BIZCUBE_AT/BIZCUBE_HK가 없습니다. 원인은 둘 중 하나입니다.\n\
+         \x20      (1) 세션 쿠키라 디스크에 기록되지 않음 — DevTools(F12)→Application→Cookies에서 BIZCUBE_AT의 Expires가 `Session`이면 이쪽입니다.\n\
+         \x20          해결: Chrome/Edge 확장 프로그램(`inno-creed --install-extension-host`)을 쓰면 쿠키 DB를 거치지 않아 이 문제 자체가 없습니다. 확장을 못 쓰는 환경이면 `inno-creed auth set`으로 두 값을 직접 저장하세요.\n\
+         \x20      (2) 로그아웃 상태 — 해결: 브라우저로 https://gw.innogrid.com 에 로그인."
+    )
 }
 
 /// Chrome User Data 루트 디렉토리(OS별). `INNO_CREED_CHROME_USER_DATA`로 오버라이드 가능.
@@ -369,54 +576,56 @@ fn edge_cookie_db() -> Result<PathBuf> {
 /// Edge 쿠키에서 크레덴셜 취득. 흐름은 `from_chrome`과 동일 — 차이는 경로와 키뿐.
 #[cfg(target_os = "windows")]
 pub fn from_edge() -> Result<Creds> {
-    let db = edge_cookie_db()?;
-    let cookies = read_cookies_db(&db, "eg")
-        .with_context(|| format!("Edge 쿠키 DB 읽기 실패: {}", db.display()))?;
-    let key = edge_key().context("Edge 복호화 키 취득 실패(win DPAPI/app-bound)")?;
+    try_edge().map_err(|f| anyhow::anyhow!("{}", f.msg))
+}
 
-    let mut auth_token = None;
-    let mut sign_key = None;
-    let mut decrypt_failed = false;
-    for (name, enc) in cookies {
-        if name != "BIZCUBE_AT" && name != "BIZCUBE_HK" {
-            continue;
+#[cfg(target_os = "windows")]
+fn try_edge() -> std::result::Result<Creds, SourceFail> {
+    let db = match edge_cookie_db() {
+        Ok(p) => p,
+        Err(e) => {
+            let root_missing = edge_user_data_dir().map(|r| !r.exists()).unwrap_or(true);
+            return Err(if root_missing {
+                SourceFail::absent("Edge 미설치(또는 프로필 없음)")
+            } else {
+                SourceFail::failed(format!("{e:#}"))
+            });
         }
-        match decrypt_chrome(&enc, &key) {
-            Ok(val) => match name.as_str() {
-                "BIZCUBE_AT" => auth_token = Some(url_decode(&val)),
-                "BIZCUBE_HK" => sign_key = Some(val),
-                _ => {}
-            },
-            Err(_) => decrypt_failed = true,
-        }
+    };
+    let cookies = read_cookies_db(&db, "eg", "Edge").map_err(failed_from)?;
+    finish_chromium("Edge", &db, cookies, edge_key)
+}
+
+/// 쿠키 DB 복사 실패를 사용자용 에러로. Windows 공유 위반(32)·잠금 위반(33)은 원인이 하나뿐
+/// (브라우저가 파일을 붙들고 있음)이라 처방을 단정해도 된다.
+fn locked_db_error(browser: &str, db: &Path, e: std::io::Error) -> anyhow::Error {
+    if matches!(e.raw_os_error(), Some(32) | Some(33)) {
+        anyhow::anyhow!(
+            "{browser}이(가) 쿠키 DB를 붙들고 있어 읽지 못했습니다({}). {browser}을(를) **완전히** 종료한 뒤 다시 시도하세요 \
+             — 창을 닫아도 백그라운드 프로세스가 남습니다(Chrome은 설정→시스템→\"Chrome을 닫아도 백그라운드 앱 계속 실행\" 끄기, \
+             또는 작업 관리자에서 프로세스 전부 종료).\n\
+             \x20      종료하지 않고 쓰려면 확장 프로그램(`inno-creed --install-extension-host`)을 설치하거나 \
+             `inno-creed auth set`으로 쿠키 값을 직접 저장하세요. (원문: {e})",
+            db.display()
+        )
+    } else {
+        anyhow::anyhow!("{browser} 쿠키 DB 읽기 실패: {} ({e})", db.display())
     }
-    if auth_token.is_none() && decrypt_failed {
-        bail!(
-            "BIZCUBE 쿠키는 있으나 복호화 실패. Edge app-bound(v20)도 Chrome과 같은 경로 검증 때문에 inno-creed 같은 제3자 프로세스로는 설계상 항상 거부됩니다(시도조차 안 함). \
-             확실한 방법: `inno-creed --install-extension-host`로 Chrome/Edge 확장 프로그램을 설치하거나, \
-             INNO_CREED_AUTH_TOKEN·INNO_CREED_SIGN_KEY 환경변수로 DevTools에서 복사한 쿠키 값을 직접 지정하세요(Firefox는 이 사이트의 세션 쿠키를 지원하지 않습니다)."
-        );
-    }
-    Ok(Creds {
-        auth_token: auth_token.with_context(|| {
-            format!(
-                "쿠키 DB({})는 읽었으나 BIZCUBE_AT 없음 — 이 프로필로 gw.innogrid.com 로그인이 안 돼 있습니다(다른 프로필이면 INNO_CREED_EDGE_COOKIES로 지정).",
-                db.display()
-            )
-        })?,
-        sign_key: sign_key.context("BIZCUBE_HK 쿠키 없음(로그인 필요)")?,
-    })
 }
 
 /// Chrome/Edge 공용 — 둘 다 같은 쿠키 DB 스키마(SQLite `cookies` 테이블)를 쓴다.
-/// `tag`는 `TempCopy` 임시파일 이름 구분용("ck"/"eg").
-fn read_cookies_db(db: &std::path::Path, tag: &str) -> Result<Vec<(String, Vec<u8>)>> {
+/// `tag`는 `TempCopy` 임시파일 이름 구분용("ck"/"eg"), `browser`는 에러 문구용.
+fn read_cookies_db(db: &Path, tag: &str, browser: &str) -> Result<Vec<(String, Vec<u8>)>> {
     // 잠금 회피: 복사본을 읽음. (Windows에서 브라우저 실행 중이면 배타 잠금이라 copy 실패 →
     // 종료 필요. 인포스틸러 대응으로 브라우저가 의도적으로 거는 잠금이라 `FileShare` 어떤
     // 조합으로도 못 뚫는다, 실측 확인함. VSS로 우회하는 시도는 해봤으나 Defender가 그 조합
     // 자체를 악성 패턴으로 오탐해 폐기함.)
     // 복사본 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
-    let tmp = TempCopy::new(db, tag)?;
+    //
+    // ⚠️ **여기서 처방을 붙여야 한다.** 예전에는 OS 원문("다른 프로세스가 파일을 사용 중…
+    // os error 32")과 경로만 올려보내서, 정작 사용자가 할 일("브라우저를 완전히 종료")은
+    // 설치 문서에만 있었다. 에러를 보는 순간에 문서는 눈앞에 없다.
+    let tmp = TempCopy::new(db, tag).map_err(|e| locked_db_error(browser, db, e))?;
     let conn = rusqlite::Connection::open(tmp.path())?;
     let mut stmt =
         conn.prepare("SELECT name, encrypted_value FROM cookies WHERE host_key='gw.innogrid.com'")?;
@@ -703,51 +912,93 @@ fn firefox_profiles_dir() -> Result<PathBuf> {
     }
 }
 
-/// Firefox 쿠키에서 크레덴셜 취득. `cookies.sqlite`는 **평문**이라 복호화 불필요.
-/// 프로필 자동 탐색(`*.default*` 우선). Chrome이 없거나 미로그인일 때의 폴백.
+/// Firefox 쿠키에서 크레덴셜 취득. 진단 문구는 `try_firefox`가 만든다.
 pub fn from_firefox() -> Result<Creds> {
-    // 1) cookies.sqlite 직접 지정(최우선) 2) 프로필 디렉토리 스캔.
-    let src = if let Some(p) = env_nonempty("INNO_CREED_FIREFOX_COOKIES") {
-        let pb = PathBuf::from(&p);
-        if !pb.exists() {
-            bail!("INNO_CREED_FIREFOX_COOKIES가 가리키는 파일 없음: {p}");
-        }
-        pb
-    } else {
-        let profiles = firefox_profiles_dir()?;
-        let entries = std::fs::read_dir(&profiles).with_context(|| {
-            format!(
-                "Firefox 프로필 디렉토리 없음: {} — snap이면 ~/snap/firefox/common/.mozilla/firefox, flatpak이면 ~/.var/app/org.mozilla.firefox/.mozilla/firefox. INNO_CREED_FIREFOX_DIR(디렉토리) 또는 INNO_CREED_FIREFOX_COOKIES(파일)로 지정 가능.",
-                profiles.display()
-            )
-        })?;
-        let mut db_path = None;
-        for entry in entries {
-            let dir = entry?.path();
-            let ck = dir.join("cookies.sqlite");
-            if ck.exists() {
-                let is_default = dir
-                    .file_name()
-                    .map(|n| n.to_string_lossy().contains("default"))
-                    .unwrap_or(false);
-                if is_default {
-                    db_path = Some(ck);
-                    break;
-                }
-                db_path.get_or_insert(ck);
-            }
-        }
-        db_path.with_context(|| {
-            format!(
-                "Firefox 프로필 디렉토리({})에 cookies.sqlite가 있는 프로필이 없음",
-                profiles.display()
-            )
-        })?
-    };
+    try_firefox().map_err(|f| anyhow::anyhow!("{}", f.msg))
+}
 
-    // 잠금 회피: 복사본을 읽음. 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
-    let tmp = TempCopy::new(&src, "ff")?;
-    let conn = rusqlite::Connection::open(tmp.path())?;
+/// `cookies.sqlite`는 **평문**이라 복호화 불필요. 프로필 자동 탐색(`*.default*` 우선).
+/// Chrome이 없거나 미로그인일 때의 폴백.
+///
+/// **Windows에서는 시도조차 하지 않는다** — 이유는 모듈 문서. 목록에서 빼는 대신 "해당 없음"을
+/// 돌려주는 것은, 왜 안 쓰는지를 `doctor`가 말해줄 수 있게 하기 위해서다(에러 문구에서는
+/// 이름만 남고 강등된다).
+fn try_firefox() -> std::result::Result<Creds, SourceFail> {
+    #[cfg(target_os = "windows")]
+    return Err(SourceFail::absent(
+        "Windows에서는 지원하지 않습니다 — gw.innogrid.com의 세션 쿠키를 Firefox가 브라우저 실행 중엔 \
+         cookies.sqlite에 아예 쓰지 않습니다(DBSC와 무관한 별개 이유, 실측 확인). \
+         Firefox 확장 프로그램은 AMO 서명 없이 릴리즈 채널에 설치가 안 돼 우회책도 없습니다.",
+    ));
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 1) cookies.sqlite 직접 지정(최우선) 2) 프로필 디렉토리 스캔.
+        let src = if let Some(p) = env_nonempty("INNO_CREED_FIREFOX_COOKIES") {
+            let pb = PathBuf::from(&p);
+            if !pb.exists() {
+                // 사용자가 **직접 지정한** 경로가 틀린 것이므로 강등하지 않는다.
+                return Err(SourceFail::failed(format!(
+                    "INNO_CREED_FIREFOX_COOKIES가 가리키는 파일이 없습니다: {p}"
+                )));
+            }
+            pb
+        } else {
+            let profiles = firefox_profiles_dir().map_err(failed_from)?;
+            // 프로필 디렉토리 자체가 없으면 **Firefox 미설치**다. 예전에는 이걸 Chrome 실패와
+            // 나란히 `os error 3`으로 찍어서, 대응 불필요한 것을 문제로 읽게 만들었다.
+            let Ok(entries) = std::fs::read_dir(&profiles) else {
+                return Err(SourceFail::absent(format!(
+                    "Firefox 미설치(프로필 디렉토리 없음: {}). 쓰고 있다면 snap은 ~/snap/firefox/common/.mozilla/firefox, \
+                     flatpak은 ~/.var/app/org.mozilla.firefox/.mozilla/firefox — INNO_CREED_FIREFOX_DIR로 지정하세요.",
+                    profiles.display()
+                )));
+            };
+            let mut db_path = None;
+            for entry in entries {
+                let dir = entry.map_err(|e| SourceFail::failed(e.to_string()))?.path();
+                let ck = dir.join("cookies.sqlite");
+                if ck.exists() {
+                    let is_default = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().contains("default"))
+                        .unwrap_or(false);
+                    if is_default {
+                        db_path = Some(ck);
+                        break;
+                    }
+                    db_path.get_or_insert(ck);
+                }
+            }
+            match db_path {
+                Some(p) => p,
+                None => {
+                    return Err(SourceFail::absent(format!(
+                        "Firefox 프로필 디렉토리({})에 cookies.sqlite가 있는 프로필이 없음",
+                        profiles.display()
+                    )));
+                }
+            }
+        };
+
+        // 잠금 회피: 복사본을 읽음. 이름은 호출마다 고유하다 — 이유는 `TempCopy` 주석.
+        let tmp = TempCopy::new(&src, "ff")
+            .map_err(|e| failed_from(locked_db_error("Firefox", &src, e)))?;
+        let (auth_token, sign_key) = read_firefox_cookies(tmp.path()).map_err(failed_from)?;
+
+        let missing = || SourceFail::failed(missing_at_msg(&src.display().to_string()));
+        Ok(Creds {
+            auth_token: auth_token.ok_or_else(missing)?,
+            sign_key: sign_key.ok_or_else(missing)?,
+        })
+    }
+}
+
+/// 복사본에서 gw 쿠키 두 개를 뽑는다. `conn`은 `tmp`(호출부)보다 먼저 닫혀야 하므로
+/// (Windows는 열린 파일을 지우지 못한다) 별도 함수로 잘라 수명을 분명히 한다.
+#[cfg(not(target_os = "windows"))]
+fn read_firefox_cookies(db: &Path) -> Result<(Option<String>, Option<String>)> {
+    let conn = rusqlite::Connection::open(db)?;
     let mut stmt =
         conn.prepare("SELECT name, value FROM moz_cookies WHERE host LIKE '%gw.innogrid.com'")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
@@ -761,19 +1012,109 @@ pub fn from_firefox() -> Result<Creds> {
             _ => {}
         }
     }
-    // Chrome 쪽과 같은 이유로 `conn`을 먼저 닫는다(`tmp`는 Drop이 지운다).
     drop(stmt);
     drop(conn);
+    Ok((auth_token, sign_key))
+}
 
+// ─────────────────────────── 크레덴셜 파일 ───────────────────────────
+//
+// 브라우저에서도 익스텐션에서도 못 가져오는 환경의 **최후의 수단**. `inno-creed auth set`이
+// 쓰고 여기서 읽는다. **MCP 도구로는 건드리지 않는다**(`config.rs`의 규약: 쓰기는 그 파일
+// 담당 모듈만).
+
+const CREDS_FILE: &str = "creds.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredCreds {
+    auth_token: String,
+    sign_key: String,
+}
+
+/// 크레덴셜 파일 경로(`~/.config/inno-creed/creds.json`).
+pub fn creds_file_path() -> Option<PathBuf> {
+    crate::config::file(CREDS_FILE)
+}
+
+fn try_file() -> std::result::Result<Creds, SourceFail> {
+    let Some(path) = creds_file_path() else {
+        return Err(SourceFail::absent("설정 디렉토리를 정할 수 없음(HOME 없음)"));
+    };
+    read_creds_file(&path)
+}
+
+/// 경로를 받아 읽는다. **경로 결정과 분리한 이유**는 테스트가 사용자의 진짜
+/// `~/.config/inno-creed/creds.json`을 건드리지 않게 하기 위해서다.
+fn read_creds_file(path: &Path) -> std::result::Result<Creds, SourceFail> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SourceFail::absent(format!("없음: {}", path.display())));
+        }
+        Err(e) => {
+            return Err(SourceFail::failed(format!(
+                "크레덴셜 파일을 읽지 못했습니다({}): {e}",
+                path.display()
+            )));
+        }
+    };
+    // 파일이 **있는데** 못 쓰는 것은 처방 대상이다 — 손으로 고치다 깨뜨린 경우가 대부분.
+    let stored: StoredCreds = serde_json::from_str(&raw).map_err(|e| {
+        SourceFail::failed(format!(
+            "크레덴셜 파일 형식 오류({}): {e}. `inno-creed auth set`으로 다시 저장하세요.",
+            path.display()
+        ))
+    })?;
+    if stored.auth_token.trim().is_empty() || stored.sign_key.trim().is_empty() {
+        return Err(SourceFail::failed(format!(
+            "크레덴셜 파일({})의 auth_token/sign_key가 비어 있습니다. `inno-creed auth set`으로 다시 저장하세요.",
+            path.display()
+        )));
+    }
     Ok(Creds {
-        auth_token: auth_token.with_context(|| {
-            format!(
-                "Firefox 쿠키({})에 BIZCUBE_AT 없음 — 이 프로필로 gw.innogrid.com 로그인이 안 돼 있습니다.",
-                src.display()
-            )
-        })?,
-        sign_key: sign_key.context("BIZCUBE_HK 쿠키 없음(Firefox 미로그인)")?,
+        auth_token: url_decode(&stored.auth_token),
+        sign_key: stored.sign_key,
     })
+}
+
+/// 크레덴셜 파일 저장. 소유자만 읽도록 권한을 좁힌다(unix).
+///
+/// ⚠️ **Windows에는 등가 수단이 없다** — ACL까지 다루는 것은 이 도구의 몫이 아니라고 보고
+/// 하지 않는다. 그쪽에서는 평문 파일이 홈 디렉토리 권한에만 기댄다.
+pub fn save_creds_file(auth_token: &str, sign_key: &str) -> Result<PathBuf> {
+    let dir = crate::config::ensure_dir()?;
+    write_creds_file(&dir.join(CREDS_FILE), auth_token, sign_key)
+}
+
+fn write_creds_file(path: &Path, auth_token: &str, sign_key: &str) -> Result<PathBuf> {
+    let body = serde_json::to_string_pretty(&StoredCreds {
+        auth_token: auth_token.trim().to_string(),
+        sign_key: sign_key.trim().to_string(),
+    })?;
+    std::fs::write(path, body)
+        .with_context(|| format!("크레덴셜 파일 쓰기 실패: {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("권한(0600) 설정 실패: {}", path.display()))?;
+    }
+    Ok(path.to_path_buf())
+}
+
+/// 크레덴셜 파일 삭제. 이미 없으면 `false`.
+///
+/// **이 명령이 있는 이유**: 파일 소스는 브라우저보다 아래라 멀쩡한 세션을 가리지는 않지만,
+/// 낡은 파일이 남아 있으면 "브라우저도 실패했는데 왜 옛 토큰으로 401만 나오는지" 헷갈린다.
+pub fn clear_creds_file() -> Result<bool> {
+    let Some(path) = creds_file_path() else {
+        return Ok(false);
+    };
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("크레덴셜 파일 삭제 실패: {}", path.display())),
+    }
 }
 
 /// 환경변수가 설정되어 있고 비어있지 않으면 그 값을 반환.
@@ -811,6 +1152,172 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.0);
         }
+    }
+
+    /// 테스트 전용 임시 크레덴셜 파일 경로. **사용자의 진짜
+    /// `~/.config/inno-creed/creds.json`을 절대 건드리지 않는다** — 그래서 경로 결정과
+    /// 읽기/쓰기를 분리해 두었다.
+    struct TmpCreds(PathBuf);
+
+    impl TmpCreds {
+        fn new(name: &str) -> Self {
+            Self(std::env::temp_dir().join(format!(
+                "inno_creed_test_creds_{}_{name}.json",
+                std::process::id()
+            )))
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TmpCreds {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn 크레덴셜_파일은_저장한_값을_그대로_돌려준다() {
+        let f = TmpCreds::new("roundtrip");
+        // authToken은 브라우저에 URL 인코딩(`%7C`)으로 들어 있다 — 붙여넣은 그대로 저장해도
+        // 읽을 때 디코드돼야 env 경로와 결과가 같다.
+        write_creds_file(f.path(), "abc%7Cdef", "hk-value").unwrap();
+        let c = read_creds_file(f.path()).expect("저장한 파일을 읽지 못했다");
+        assert_eq!(c.auth_token, "abc|def", "%7C가 디코드돼야 한다");
+        assert_eq!(c.sign_key, "hk-value");
+    }
+
+    #[test]
+    fn 크레덴셜_파일이_없으면_처방_대상이_아니다() {
+        let f = TmpCreds::new("absent");
+        let fail = read_creds_file(f.path())
+            .err()
+            .expect("없는 파일은 실패해야 한다");
+        assert!(
+            fail.absent,
+            "파일 없음은 정상 상태다 — Failed로 올리면 최종 에러에서 진짜 문제를 가린다"
+        );
+    }
+
+    #[test]
+    fn 깨진_크레덴셜_파일은_처방_대상이다() {
+        let f = TmpCreds::new("broken");
+        std::fs::write(f.path(), "{ 이건 JSON이 아니다").unwrap();
+        let fail = read_creds_file(f.path())
+            .err()
+            .expect("깨진 파일은 실패해야 한다");
+        assert!(!fail.absent, "파일이 있는데 못 쓰는 것은 사용자가 손댈 일이다");
+        assert!(fail.msg.contains("auth set"), "다시 저장하는 법을 알려줘야 한다");
+    }
+
+    #[test]
+    fn 빈_값이_든_크레덴셜_파일은_처방_대상이다() {
+        let f = TmpCreds::new("empty");
+        std::fs::write(f.path(), r#"{"auth_token":"","sign_key":"hk"}"#).unwrap();
+        let fail = read_creds_file(f.path())
+            .err()
+            .expect("빈 값은 실패해야 한다");
+        assert!(!fail.absent);
+    }
+
+    /// 최종 에러의 요점은 **하나뿐인 진짜 문제를 보이게 하는 것**이다. 예전에는 Firefox
+    /// 미설치(`os error 3`)가 Chrome 실패와 나란히 찍혀 두 번째 문제처럼 읽혔다.
+    #[test]
+    fn 최종_에러는_처방없는_실패를_강등한다() {
+        let msg = render_failure(&[
+            SourceReport {
+                source: "환경변수",
+                outcome: Outcome::Absent("미설정".into()),
+            },
+            SourceReport {
+                source: "Chrome",
+                outcome: Outcome::Failed("Chrome을 종료하세요".into()),
+            },
+            SourceReport {
+                source: "Firefox",
+                outcome: Outcome::Absent("Firefox 미설치".into()),
+            },
+        ]);
+        let chrome_line = msg.find("Chrome을 종료하세요").expect("처방은 본문에 나와야 한다");
+        let absent_line = msg.find("대응 불필요").expect("강등 줄이 있어야 한다");
+        assert!(chrome_line < absent_line, "처방이 잡음보다 먼저 와야 한다");
+        assert!(
+            !msg.contains("Firefox 미설치"),
+            "강등된 항목의 상세는 본문에 늘어놓지 않는다 — 이름만 남긴다"
+        );
+    }
+
+    #[test]
+    fn 소스가_하나도_없으면_다음_행동을_안내한다() {
+        let msg = render_failure(&[
+            SourceReport {
+                source: "환경변수",
+                outcome: Outcome::Absent("미설정".into()),
+            },
+            SourceReport {
+                source: "Chrome",
+                outcome: Outcome::Absent("Chrome 미설치".into()),
+            },
+        ]);
+        // 처방이 하나도 없어도 다음 행동은 줘야 한다. Windows는 익스텐션 설치가, 그 외는
+        // 브라우저 로그인이 그 행동이다.
+        let has_next_step = msg.contains("로그인") || msg.contains("install-extension-host");
+        assert!(has_next_step, "처방이 없으면 다음 행동을 줘야 한다:\n{msg}");
+    }
+
+    /// Windows 공유 위반(32)은 원인이 하나뿐이라 처방을 단정한다. 예전에는 OS 원문과 경로만
+    /// 올려보내서, 정작 할 일("브라우저 완전 종료")은 설치 문서에만 있었다.
+    #[test]
+    fn 잠긴_쿠키db는_종료_처방을_준다() {
+        let e = std::io::Error::from_raw_os_error(32);
+        let msg = format!("{:#}", locked_db_error("Chrome", Path::new("/x/Cookies"), e));
+        assert!(msg.contains("완전히"), "종료하라는 처방이 있어야 한다");
+        assert!(
+            msg.contains("install-extension-host") || msg.contains("auth set"),
+            "종료하지 않고 쓰는 우회로도 알려줘야 한다"
+        );
+    }
+
+    #[test]
+    fn 잠금이_아닌_io오류는_원문을_보존한다() {
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "권한 없음");
+        let msg = format!("{:#}", locked_db_error("Chrome", Path::new("/x/Cookies"), e));
+        assert!(msg.contains("권한 없음"), "원인을 지어내지 말고 원문을 남겨야 한다");
+        assert!(!msg.contains("완전히"), "잠금이 아닌데 종료 처방을 주면 오진이다");
+    }
+
+    /// 원인을 하나로 단정하면 또 오진이 된다 — 세션 쿠키와 로그아웃이 같은 모습으로 보인다.
+    #[test]
+    fn at누락_문구는_두_원인을_모두_적는다() {
+        let msg = missing_at_msg("/x/Cookies");
+        assert!(msg.contains("세션 쿠키"), "디스크에 안 남는 경우");
+        assert!(msg.contains("로그아웃"), "지워진 경우");
+    }
+
+    /// 소스 순서는 **문서가 아니라 코드가 정본**이다 — `doctor` 출력과 README가 이 순서를
+    /// 그대로 적으므로, 순서를 바꾸면 여기서 먼저 걸려야 한다.
+    ///
+    /// 특히 **크레덴셜 파일이 마지막**인 것이 핵심이다. 위로 올리면 만료된 `creds.json`
+    /// 하나가 멀쩡한 브라우저 세션을 영영 가린다(`from_browser` 주석).
+    #[test]
+    fn 소스_순서는_환경변수부터_크레덴셜파일까지다() {
+        let names: Vec<&str> = sources().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names.first(), Some(&"환경변수"), "env가 늘 최우선이다");
+        assert_eq!(
+            names.last(),
+            Some(&"크레덴셜 파일"),
+            "파일은 반드시 브라우저보다 아래여야 한다"
+        );
+        let idx = |n: &str| names.iter().position(|x| *x == n);
+        assert!(
+            idx("익스텐션 캐시") < idx("Chrome"),
+            "익스텐션이 쿠키 DB 직독보다 먼저다(v20·잠금·세션쿠키 문제가 없는 경로)"
+        );
+        #[cfg(target_os = "windows")]
+        assert!(idx("Edge").is_some(), "Windows에서는 Edge도 시도한다");
+        #[cfg(not(target_os = "windows"))]
+        assert!(idx("Edge").is_none(), "비-Windows에서 Edge를 볼 이유가 없다");
     }
 
     #[test]

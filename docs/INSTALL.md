@@ -31,6 +31,7 @@
 | Linux x86_64 | `inno-creed-linux-x86_64` |
 | Linux aarch64 | `inno-creed-linux-aarch64` |
 | Windows x86_64 | `inno-creed-windows-x86_64.exe` |
+| **(Windows 권장) 확장 프로그램** | `inno-creed-extension.zip` — 4번에서 씁니다 |
 
 ---
 
@@ -115,16 +116,21 @@ claude mcp add inno-creed --scope user -- /절대경로/inno-creed          # Wi
 
 `gw.innogrid.com`의 로그인 쿠키(`BIZCUBE_AT`/`BIZCUBE_HK`)는 **세션 쿠키**라 브라우저가 켜져 있는 동안만 존재합니다. Windows Chrome/Edge는 여기에 더해 실행 중 쿠키 파일을 배타 잠금 걸고, `v20` app-bound 암호화도 제3자 프로세스로는 설계상 항상 거부합니다 — 쿠키 DB 파일을 직접 읽는 방식([6번 문제 해결](#6-크레덴셜이-안-잡힐-때-문제-해결) 참고)은 이 조합을 다 뚫어야 하는 데다 [DBSC](#dbsc란--쿠키-db-직접-읽기가-왜-점점-막히나) 때문에 갈수록 막힙니다. **Windows에서는 Chrome/Edge 확장 프로그램을 쓰세요** — 브라우저가 공식으로 열어준 `cookies` API로 평문 값을 바로 받아 이 문제들을 전부 우회합니다.
 
-1. Native messaging host를 등록합니다(최초 1회):
+1. [릴리즈](https://github.com/zilhak/inno-creed/releases/latest)에서 **`inno-creed-extension.zip`**을 받아 **압축을 풉니다**(예: `C:\Tools\inno-creed-extension\`). 압축을 푼 그 폴더를 5번에서 지정하므로 **지우지 말고 그 자리에 두세요** — Chrome은 압축해제 확장을 원본 폴더에서 계속 읽습니다.
+2. Native messaging host를 등록합니다(최초 1회):
    ```sh
    inno-creed --install-extension-host
    ```
-2. `chrome://extensions`(또는 `edge://extensions`)를 엽니다.
-3. 우측 상단 **개발자 모드**를 켭니다.
-4. **압축해제된 확장 프로그램을 로드합니다** → 이 저장소를 받은 경로의 `extension/` 폴더를 선택합니다.
-5. `https://gw.innogrid.com`에 로그인돼 있으면(또는 방금 로그인하면) 자동으로 크레덴셜이 전달됩니다. 이후로도 로그인·로그아웃할 때마다 자동으로 동기화됩니다 — 매번 다시 로드할 필요 없습니다.
+3. `chrome://extensions`(또는 `edge://extensions`)를 엽니다.
+4. 우측 상단 **개발자 모드**를 켭니다.
+5. **압축해제된 확장 프로그램을 로드합니다** → 1번에서 압축을 푼 `inno-creed-extension` 폴더를 선택합니다.
+6. `https://gw.innogrid.com`에 로그인돼 있으면(또는 방금 로그인하면) 자동으로 크레덴셜이 전달됩니다. 이후로도 로그인·로그아웃할 때마다 자동으로 동기화됩니다 — 매번 다시 로드할 필요 없습니다.
 
-> Chrome/Edge 둘 다에서 쓰려면 익스텐션을 두 브라우저 각각에 로드하면 됩니다(같은 `extension/` 폴더, native host 등록은 이미 양쪽 다 돼 있음).
+> 확장 ID는 `manifest.json`의 고정 공개키(`key`)로 결정되므로 **어디에 풀든, 몇 번을 다시 로드하든 바뀌지 않습니다**(`hpabcmnjaahhdenpdmfjlmkfjljdldbf`). 2번이 등록하는 허용 origin이 이 ID라서, 그 값이 흔들리면 브릿지가 조용히 끊깁니다 — 그래서 키를 박아두었습니다.
+>
+> 소스에서 직접 쓰고 싶다면 저장소의 `extension/` 폴더를 그대로 로드해도 같습니다(zip은 그 폴더의 런타임 파일 `manifest.json`·`background.js`만 담은 것입니다).
+
+> Chrome/Edge 둘 다에서 쓰려면 익스텐션을 두 브라우저 각각에 로드하면 됩니다(같은 폴더를 그대로 쓰면 되고, native host 등록은 이미 양쪽 다 돼 있음).
 
 ## 5. 로그인 & 확인 (macOS/Linux, 또는 Windows에서 확장 프로그램 없이)
 

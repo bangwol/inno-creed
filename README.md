@@ -114,7 +114,7 @@
 inno-creed --install-extension-host   # native messaging host 등록(최초 1회)
 ```
 
-이후 `chrome://extensions`(또는 `edge://extensions`) → **개발자 모드** 켜기 → **압축해제된 확장 프로그램 로드** → 이 저장소의 `extension/` 폴더 선택. 로드 시점에 이미 로그인돼 있으면 즉시, 이후로는 로그인·로그아웃할 때마다 자동으로 동기화됩니다. 자세한 절차는 [`docs/INSTALL.md`](docs/INSTALL.md) 참고.
+이후 [릴리즈](https://github.com/zilhak/inno-creed/releases/latest)의 **`inno-creed-extension.zip`**을 받아 풀고, `chrome://extensions`(또는 `edge://extensions`) → **개발자 모드** 켜기 → **압축해제된 확장 프로그램 로드** → 푼 폴더 선택(저장소를 clone했다면 `extension/` 폴더를 그대로 써도 같습니다). 로드 시점에 이미 로그인돼 있으면 즉시, 이후로는 로그인·로그아웃할 때마다 자동으로 동기화됩니다. 자세한 절차는 [`docs/INSTALL.md`](docs/INSTALL.md) 참고.
 
 ### ⚠️ 쿠키 DB 직접 읽기는 점점 막히는 경로입니다 (DBSC)
 
@@ -194,6 +194,7 @@ MCP 클라이언트로 실행할 땐 등록 설정의 `env` 블록에 넣으세�
 | Linux x86_64 | `inno-creed-linux-x86_64` |
 | Linux aarch64 | `inno-creed-linux-aarch64` |
 | Windows x86_64 | `inno-creed-windows-x86_64.exe` |
+| **(Windows 권장) 확장 프로그램** | `inno-creed-extension.zip` |
 
 macOS·Linux는 내려받은 뒤 실행 권한을 부여하세요: `chmod +x inno-creed-*`. (macOS에서 Gatekeeper가 막으면 `xattr -d com.apple.quarantine <파일>`.)
 

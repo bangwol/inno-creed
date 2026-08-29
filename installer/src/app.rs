@@ -1,6 +1,8 @@
 //! 마법사 상태 머신 — 화면 전환과 각 화면의 렌더링.
 
 use crate::{install, payload};
+#[cfg(target_os = "windows")]
+use crate::registry;
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -12,6 +14,9 @@ enum Screen {
     ExtensionGuide,
     Done,
     Error(String),
+    UninstallConfirm,
+    UninstallAppRunning,
+    UninstallDone,
 }
 
 pub struct InstallerApp {
@@ -42,6 +47,17 @@ impl Default for InstallerApp {
     }
 }
 
+impl InstallerApp {
+    /// `--uninstall`로 실행됐을 때의 초기 상태. 설치 때와 같은 자동 감지 로직으로
+    /// config 경로·설치 위치를 잡는다 — 별도 메타데이터 파일을 두지 않는다.
+    pub fn new_uninstall() -> Self {
+        Self {
+            screen: Screen::UninstallConfirm,
+            ..Self::default()
+        }
+    }
+}
+
 impl eframe::App for InstallerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ui, |ui| {
@@ -54,6 +70,9 @@ impl eframe::App for InstallerApp {
                 Screen::ExtensionGuide => self.extension_guide_screen(ui),
                 Screen::Done => self.done_screen(ui),
                 Screen::Error(_) => self.error_screen(ui),
+                Screen::UninstallConfirm => self.uninstall_confirm_screen(ui),
+                Screen::UninstallAppRunning => self.uninstall_app_running_screen(ui),
+                Screen::UninstallDone => self.uninstall_done_screen(ui),
             }
         });
     }
@@ -196,6 +215,16 @@ impl InstallerApp {
             payload::inno_creed_binary_name(),
         ) {
             Ok(result) => {
+                // "프로그램 추가/제거" 등록은 있으면 좋은 부가 기능이라, 실패해도
+                // 설치 자체를 막지 않는다(레지스트리 접근이 막힌 사내 정책 등 대비).
+                #[cfg(target_os = "windows")]
+                {
+                    if let Ok(installer_copy) =
+                        install::copy_installer_self(&self.install_dir, "installer.exe")
+                    {
+                        let _ = registry::register_uninstall_entry(&self.install_dir, &installer_copy);
+                    }
+                }
                 self.screen = if result.extension_dir.is_some() {
                     Screen::ExtensionGuide
                 } else {
@@ -297,6 +326,82 @@ impl InstallerApp {
             if ui.button("← 처음으로").clicked() {
                 self.screen = Screen::Welcome;
             }
+        });
+    }
+
+    fn uninstall_confirm_screen(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.heading("inno-creed 제거");
+            ui.add_space(12.0);
+            ui.label("Claude Desktop 설정에서 inno-creed 등록을 지우고, 설치된 파일을 삭제합니다.");
+            ui.add_space(8.0);
+            match &self.config_path {
+                Some(p) => {
+                    ui.small(format!("설정 파일: {}", p.display()));
+                }
+                None => {
+                    ui.colored_label(egui::Color32::from_rgb(200, 90, 60), "설정 파일을 찾지 못했습니다 — 등록 해제는 건너뜁니다.");
+                }
+            }
+            ui.small(format!("삭제할 폴더: {}", self.install_dir.display()));
+            ui.add_space(20.0);
+            if ui
+                .add(egui::Button::new("제거").min_size(egui::vec2(120.0, 32.0)))
+                .clicked()
+            {
+                self.screen = if config_kit::is_claude_desktop_running() {
+                    Screen::UninstallAppRunning
+                } else {
+                    self.do_uninstall();
+                    Screen::UninstallDone
+                };
+            }
+        });
+    }
+
+    fn uninstall_app_running_screen(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.heading("Claude Desktop을 종료해주세요");
+            ui.add_space(12.0);
+            ui.label("설정 파일을 안전하게 고치려면 Claude Desktop이 완전히 꺼져 있어야 합니다.");
+            ui.add_space(20.0);
+            if ui.button("다시 확인").clicked() {
+                self.screen = if config_kit::is_claude_desktop_running() {
+                    Screen::UninstallAppRunning
+                } else {
+                    self.do_uninstall();
+                    Screen::UninstallDone
+                };
+            }
+        });
+    }
+
+    fn do_uninstall(&mut self) {
+        if let Some(config_path) = &self.config_path {
+            let installer_copy = self.install_dir.join("installer.exe");
+            if let Err(e) = install::perform_uninstall(config_path, &self.install_dir, &installer_copy) {
+                self.screen = Screen::Error(format!("제거 중 오류가 발생했습니다: {e:#}"));
+                return;
+            }
+            #[cfg(target_os = "windows")]
+            {
+                registry::remove_uninstall_entry();
+                install::schedule_self_delete(&installer_copy, &self.install_dir);
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                install::schedule_self_delete(&installer_copy, &self.install_dir);
+            }
+        }
+    }
+
+    fn uninstall_done_screen(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.heading("제거 완료");
+            ui.add_space(12.0);
+            ui.label("inno-creed 등록을 지웠습니다. Claude Desktop을 다시 실행하면 반영됩니다.");
+            ui.add_space(8.0);
+            ui.small("이 창은 닫아도 됩니다.");
         });
     }
 }

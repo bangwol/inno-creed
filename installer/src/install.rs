@@ -84,6 +84,74 @@ pub fn run_doctor(exe_path: &Path) -> anyhow::Result<String> {
     Ok(text)
 }
 
+/// 인스톨러 자기 자신을 설치 위치에 복사해둔다 — "프로그램 추가/제거"의 제거 항목이
+/// 이 사본을 실행하므로, 사용자가 원래 받은 zip을 지워버려도 제거할 수 있다.
+pub fn copy_installer_self(install_dir: &Path, installer_exe_name: &str) -> std::io::Result<PathBuf> {
+    let src = std::env::current_exe()?;
+    let dest = install_dir.join(installer_exe_name);
+    if src != dest {
+        std::fs::copy(&src, &dest)?;
+    }
+    Ok(dest)
+}
+
+/// 등록 해제 + inno-creed 실행 파일·확장 폴더 삭제. **installer 자기 자신은 지우지
+/// 않는다** — Windows는 실행 중인 exe를 스스로 지울 수 없다. 자기 자신 정리는
+/// `schedule_self_delete`가 프로세스 종료 후 별도로 처리한다.
+pub fn perform_uninstall(config_path: &Path, install_dir: &Path, keep: &Path) -> anyhow::Result<()> {
+    if config_path.exists() {
+        let _ = config_kit::backup(config_path);
+        let mut root = config_kit::read_json(config_path)?;
+        config_kit::remove_inno_creed_entry(&mut root);
+        config_kit::write_atomic(config_path, &root)?;
+    }
+    if install_dir.exists() {
+        for entry in std::fs::read_dir(install_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path == keep {
+                continue;
+            }
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(&path)?;
+            } else {
+                std::fs::remove_file(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 프로세스가 끝난 뒤 installer 사본과 (비어 있다면) 설치 폴더까지 지운다.
+/// Windows에서 실행 중인 exe는 자기 자신을 못 지우므로, 창을 닫아 프로세스가
+/// 끝날 시간을 벌기 위해 점점 길게 대기하며 최대 3번 재시도한다(총 최대 ~9초).
+/// 그래도 실패하면 치명적이지 않다 — 등록 해제·데이터 삭제는 이미 끝난 뒤라
+/// installer.exe 한 파일만 남는 정도다.
+#[cfg(target_os = "windows")]
+pub fn schedule_self_delete(installer_exe: &Path, install_dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let exe = installer_exe.display();
+    let dir = install_dir.display();
+    let cmd = format!(
+        "ping 127.0.0.1 -n 2 >nul & del /f /q \"{exe}\" || \
+         (ping 127.0.0.1 -n 3 >nul & del /f /q \"{exe}\") || \
+         (ping 127.0.0.1 -n 5 >nul & del /f /q \"{exe}\") & \
+         rmdir \"{dir}\" 2>nul"
+    );
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", &cmd])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn schedule_self_delete(installer_exe: &Path, install_dir: &Path) {
+    // Unix는 실행 중인 파일도 unlink할 수 있으므로 바로 지운다.
+    let _ = std::fs::remove_file(installer_exe);
+    let _ = std::fs::remove_dir_all(install_dir);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +237,56 @@ mod tests {
         assert!(result.backup_path.is_none()); // 원본이 없었으니 백업도 없다
         let written = config_kit::read_json(&config_path).unwrap();
         assert!(written["mcpServers"]["inno-creed"]["command"].is_string());
+
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    #[test]
+    fn uninstall_removes_registration_but_preserves_other_keys_and_servers() {
+        let work = temp_dir("uninstall");
+        let src_bin = work.join("fake-inno-creed");
+        std::fs::write(&src_bin, b"fake").unwrap();
+        let config_path = work.join("claude_desktop_config.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_string(&json!({
+                "preferences": { "epitaxyPrefs": { "x": 1 } },
+                "mcpServers": { "other-tool": { "command": "/bin/other" } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let install_dir = work.join("installed");
+        let result =
+            perform_install(&config_path, &install_dir, &src_bin, None, "inno-creed").unwrap();
+        assert!(result.exe_path.exists());
+
+        let keep = install_dir.join("installer.exe"); // 이 테스트에선 실제로 존재하지 않음
+        perform_uninstall(&config_path, &install_dir, &keep).unwrap();
+
+        assert!(!result.exe_path.exists(), "설치된 inno-creed 실행 파일은 지워져야 함");
+        let written = config_kit::read_json(&config_path).unwrap();
+        assert!(written["mcpServers"].get("inno-creed").is_none());
+        assert_eq!(written["mcpServers"]["other-tool"]["command"], "/bin/other");
+        assert_eq!(written["preferences"]["epitaxyPrefs"]["x"], 1);
+
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    #[test]
+    fn uninstall_keeps_the_named_file() {
+        let work = temp_dir("uninstall-keep");
+        let install_dir = work.join("installed");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        let keep = install_dir.join("installer.exe");
+        std::fs::write(&keep, b"self").unwrap();
+        std::fs::write(install_dir.join("inno-creed.exe"), b"bin").unwrap();
+
+        let config_path = work.join("claude_desktop_config.json"); // 존재하지 않아도 됨
+        perform_uninstall(&config_path, &install_dir, &keep).unwrap();
+
+        assert!(keep.exists(), "keep으로 지정한 파일은 남아있어야 함");
+        assert!(!install_dir.join("inno-creed.exe").exists());
 
         std::fs::remove_dir_all(&work).ok();
     }

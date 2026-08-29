@@ -5,8 +5,12 @@
 mod app;
 mod install;
 mod payload;
+#[cfg(target_os = "windows")]
+mod registry;
 
 fn main() -> eframe::Result<()> {
+    let uninstall = std::env::args().any(|a| a == "--uninstall");
+    let title = if uninstall { "inno-creed 제거" } else { "inno-creed 설치" };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 480.0])
@@ -14,11 +18,16 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "inno-creed 설치",
+        title,
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             setup_korean_font(&cc.egui_ctx);
-            Ok(Box::new(app::InstallerApp::default()))
+            let app = if uninstall {
+                app::InstallerApp::new_uninstall()
+            } else {
+                app::InstallerApp::default()
+            };
+            Ok(Box::new(app))
         }),
     )
 }

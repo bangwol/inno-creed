@@ -25,12 +25,13 @@ try {
     }
 
     $stage = Join-Path $env:TEMP "inno-creed-installer-stage-$([System.Guid]::NewGuid())"
-    New-Item -ItemType Directory -Force -Path "$stage/payload/extension" | Out-Null
+    New-Item -ItemType Directory -Force -Path "$stage/payload/extension/icons" | Out-Null
 
     Copy-Item "$releaseDir/installer.exe" "$stage/installer.exe"
     Copy-Item "$releaseDir/inno-creed.exe" "$stage/payload/inno-creed.exe"
     Copy-Item "extension/manifest.json" "$stage/payload/extension/manifest.json"
     Copy-Item "extension/background.js" "$stage/payload/extension/background.js"
+    Copy-Item "extension/icons/*" "$stage/payload/extension/icons/"
 
     New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     $zipPath = Join-Path (Resolve-Path $OutDir) "inno-creed-installer-windows-x86_64.zip"

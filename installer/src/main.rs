@@ -15,10 +15,13 @@ mod registry;
 fn main() -> eframe::Result<()> {
     let uninstall = std::env::args().any(|a| a == "--uninstall");
     let title = if uninstall { "inno-creed 제거" } else { "inno-creed 설치" };
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png"))
+        .expect("bundled icon.png must decode");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([560.0, 480.0])
-            .with_resizable(false),
+            .with_resizable(false)
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(

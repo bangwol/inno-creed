@@ -187,7 +187,7 @@
         <span class="badge warn">조건부 가능</span>
         <div class="name">Cowork</div>
         <div class="where">Desktop 앱의 <b>Cowork</b> 탭</div>
-        <p>"이 일을 해줘"라고 맡기면 알아서 처리하는 에이전트 모드입니다. 단, <b>데스크톱 앱을 컴퓨터에 설치해서 그 자리에서 켜 놓은 경우에만</b> 됩니다. 같은 Cowork라도 웹브라우저·휴대폰 앱으로 들어간 세션은 안 됩니다.</p>
+        <p>"이 일을 해줘"라고 맡기면 알아서 처리하는 에이전트 모드입니다. <b>컴퓨터에 설치된 Desktop 앱이 켜져 있으면</b> 그 앱이 다리 역할을 해서, 웹브라우저·휴대폰의 Cowork 세션에서도 그대로 연결됩니다. Desktop 앱 자체가 꺼져 있으면 어디서 접속하든 안 됩니다.</p>
       </div>
       <div class="card">
         <span class="badge ok">가능</span>
@@ -264,7 +264,7 @@
 }</code></pre>
       <p>저장 후 Desktop 앱을 <b>완전히 종료(트레이 포함)했다가 다시 실행</b>하면 Cowork·Code·Chat 모든 탭에서 같은 설정을 공유합니다.</p>
       <div class="note" style="margin-top:16px;">
-        <b>웹브라우저나 휴대폰 앱으로 켠 Cowork 세션에서는 이 설정이 보이지 않습니다.</b> 로컬 MCP 서버는 Anthropic 정책상 데스크톱 앱으로 실행 중인 세션에서만 연결되기 때문입니다. 꼭 컴퓨터에 설치된 Desktop 앱을 켜서 쓰세요.
+        <b>웹브라우저나 휴대폰 앱으로 켠 Cowork 세션에서도 됩니다</b> — 단, <b>컴퓨터에 설치된 Desktop 앱이 실행 중이어야</b> 합니다. Desktop 앱이 다리 역할을 해서 로컬 도구를 원격 세션으로 연결해주기 때문입니다(도구 이름 앞에 <code>remote-devices</code>가 붙어서 나타납니다). Desktop 앱 자체를 꺼두면 어디서 접속하든 안 됩니다.
       </div>
     </div>
 
@@ -348,7 +348,7 @@
     cowork: {
       badge: 'warn', badgeText: '조건부 가능',
       title: 'Cowork를 쓰고 계시네요',
-      body: 'inno-creed를 쓸 수 있습니다. 단, <b>지금처럼 Desktop 앱을 컴퓨터에 직접 설치해서 켜 놓은 상태</b>여야 합니다(웹·모바일 Cowork는 안 됩니다). 아래에서 Cowork 설치 방법을 확인하세요.',
+      body: 'inno-creed를 쓸 수 있습니다. 단, <b>컴퓨터에 설치된 Desktop 앱이 켜져 있어야</b> 합니다(웹·모바일 Cowork에서 접속해도 되지만, 다리 역할을 하는 Desktop 앱 자체는 꺼두면 안 됩니다). 아래에서 Cowork 설치 방법을 확인하세요.',
       tab: 'cowork'
     },
     cli: {

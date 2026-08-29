@@ -118,10 +118,10 @@ impl InstallerApp {
 
             ui.group(|ui| {
                 ui.set_width(460.0);
-                ui.label(
-                    "⚠️  아직 Claude Desktop이 없다면, claude.ai/download에서 먼저 설치한 뒤 \
-                     이 프로그램을 다시 실행하세요.",
-                );
+                ui.label("⚠️  아직 Claude Desktop이 없다면, 먼저 설치한 뒤 이 프로그램을 다시 실행하세요.");
+                if ui.link("claude.ai/download 열기").clicked() {
+                    let _ = open::that("https://claude.ai/download");
+                }
             });
             ui.add_space(12.0);
             ui.group(|ui| {
@@ -182,8 +182,13 @@ impl InstallerApp {
             None => {
                 ui.colored_label(
                     egui::Color32::from_rgb(200, 90, 60),
-                    "찾지 못했습니다. Claude Desktop을 한 번이라도 실행한 적이 있나요?",
+                    "찾지 못했습니다. Claude Desktop이 설치되어 있지 않거나, 설치는 됐지만 \
+                     한 번도 실행한 적이 없을 수 있습니다(설정 파일은 처음 실행할 때 만들어집니다).",
                 );
+                if ui.link("claude.ai/download 열기").clicked() {
+                    let _ = open::that("https://claude.ai/download");
+                }
+                ui.add_space(4.0);
                 for c in &self.config_candidates {
                     ui.small(format!("  (확인한 경로) {}", c.display()));
                 }
@@ -313,11 +318,13 @@ impl InstallerApp {
     fn extension_guide_screen(&mut self, ui: &mut egui::Ui) {
         ui.heading("확장 프로그램 연결");
         ui.add_space(12.0);
-        ui.label("아마란스 로그인 정보를 안전하게 가져오려면 Chrome/Edge 확장 프로그램을 마저 등록해야 합니다.");
+        ui.label("아마란스 로그인 정보를 안전하게 가져오려면 Chrome/Edge 확장 프로그램을 마저 등록해야 합니다. 아직 안 하면 로그인 인증이 안 잡힙니다.");
         ui.add_space(8.0);
         ui.label("1. 아래 [확장 폴더 열기]로 열리는 폴더를 기억해두세요.");
-        ui.label("2. chrome://extensions (또는 edge://extensions)를 열고 우측 상단 개발자 모드를 켭니다.");
-        ui.label("3. [압축해제된 확장 프로그램을 로드합니다]를 눌러 방금 그 폴더를 선택합니다.");
+        ui.label("2. 아래 버튼으로 확장 관리 화면을 열고 개발자 모드를 켭니다.");
+        ui.label("   (Chrome은 화면 우측 상단, Edge는 화면 좌측 하단에 토글이 있습니다)");
+        ui.label("3. \"압축해제된 확장 프로그램을 로드합니다\"(Edge는 \"압축 풀린 파일 로드\")를 눌러 방금 그 폴더를 선택합니다.");
+        ui.label("4. 목록에 \"inno-creed 크레덴셜 브릿지\" 카드가 뜨고 토글이 켜져 있으면 성공입니다.");
         ui.add_space(16.0);
 
         ui.horizontal(|ui| {
@@ -329,6 +336,19 @@ impl InstallerApp {
             if ui.button("🌐 chrome://extensions 열기").clicked() {
                 let _ = open::that("chrome://extensions");
             }
+            if ui.button("🌐 edge://extensions 열기").clicked() {
+                let _ = open::that("edge://extensions");
+            }
+        });
+
+        ui.add_space(16.0);
+        ui.group(|ui| {
+            ui.set_width(460.0);
+            ui.label(
+                "⚠️  Edge를 새로 시작하면 \"개발자 모드에서 확장 사용 해제\" 경고 팝업이 뜰 수 \
+                 있습니다. 여기서 [확장 사용 해제]를 누르면 방금 설치한 확장이 꺼집니다 — \
+                 이 버튼은 누르지 말고 [나중에]를 누르세요.",
+            );
         });
 
         ui.add_space(24.0);

@@ -128,22 +128,86 @@ pub fn write_atomic(path: &Path, value: &Value) -> io::Result<()> {
     Ok(())
 }
 
-/// 주어진 이름 중 하나라도 부분 일치(대소문자 무시)하는 프로세스가 실행 중이면 참.
-/// Claude Desktop 실행 여부 확인용 — Windows는 `Claude.exe`, macOS/Linux는 `Claude`.
-pub fn is_process_running(names: &[&str]) -> bool {
+/// Claude Desktop이 실행 중인지 본다.
+///
+/// **프로세스 "이름"만으로는 절대 판단하지 않는다.** Windows에서는 Claude Desktop과
+/// Claude Code CLI 둘 다 실행 파일 이름이 똑같이 `claude.exe`다(개발자 컴퓨터에서 실측
+/// 확인 — CLI는 `~\.local\bin\claude.exe`, Desktop MSIX는
+/// `...\WindowsApps\Claude_<hash>\app\Claude....exe`). 이름만 보면 CLI를 쓰는 사람은
+/// 100%에 가깝게 "Desktop이 켜져 있다"는 오탐을 만난다 — 실행 파일 **경로**로 구분한다.
+pub fn is_claude_desktop_running() -> bool {
     use sysinfo::System;
     let mut sys = System::new_all();
     sys.refresh_all();
-    let needles: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
-    sys.processes().values().any(|p| {
-        let pname = p.name().to_string_lossy().to_lowercase();
-        needles.iter().any(|n| pname.contains(n.as_str()))
-    })
+    sys.processes().values().any(is_claude_desktop_process)
+}
+
+fn is_claude_desktop_process(p: &sysinfo::Process) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // 리눅스는 배포 위치가 제각각이라 경로 패턴을 하나로 못 잡는다. 대신 CLI는
+        // 관례상 소문자 `claude`를 쓰므로, 정확히 대문자로 시작하는 `Claude` 프로세스
+        // 이름으로 구분한다(파일시스템이 대소문자를 구분하므로 신뢰할 수 있다).
+        return p.name().to_string_lossy() == "Claude";
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Some(exe) = p.exe() else { return false };
+        exe_path_looks_like_claude_desktop(&exe.to_string_lossy().to_lowercase())
+    }
+}
+
+/// 실행 파일 경로(소문자로 정규화됨) 하나만 보고 Claude Desktop인지 판단하는 순수 함수.
+/// `sysinfo::Process` 없이도 테스트할 수 있도록 로직을 분리했다.
+#[cfg(not(target_os = "linux"))]
+fn exe_path_looks_like_claude_desktop(path_lower: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        // MSIX(Microsoft Store), 클래식 설치, 3P(엔터프라이즈) 배포본 각각의 실제 설치 경로.
+        path_lower.contains(r"\windowsapps\claude_")
+            || path_lower.contains(r"\programs\claude\")
+            || path_lower.contains(r"\claude-3p\")
+    }
+    #[cfg(target_os = "macos")]
+    {
+        path_lower.contains("/claude.app/")
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = path_lower;
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // 개발자 컴퓨터에서 실측한 실제 경로. Claude Code CLI와 Claude Desktop이 둘 다 켜져
+    // 있는 상태에서 `Get-Process | Select ProcessName, Path`로 확인 — 이름은 둘 다
+    // "claude"로 완전히 같고, 경로만 다르다. 이걸 구분 못 하면 CLI를 쓰는 사람은 거의
+    // 항상 "Desktop이 켜져 있다"는 오탐을 만난다(설치 마법사가 못 넘어감).
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn cli_binary_path_is_not_desktop() {
+        let cli = r"c:\users\zilha\.local\bin\claude.exe".to_lowercase();
+        assert!(!exe_path_looks_like_claude_desktop(&cli));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn msix_desktop_path_is_detected() {
+        let msix = r"c:\program files\windowsapps\claude_1.40609.0.0_x64__pzs8sxrjxfjjc\app\claude.exe"
+            .to_lowercase();
+        assert!(exe_path_looks_like_claude_desktop(&msix));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn classic_install_path_is_detected() {
+        let classic = r"c:\users\zilha\appdata\local\programs\claude\claude.exe".to_lowercase();
+        assert!(exe_path_looks_like_claude_desktop(&classic));
+    }
 
     // INSTALLER_TODO.md에 남은 실제 관측값(등록 전 claude_desktop_config.json) — 이 구조가
     // 머지 후에도 바이트 단위로 무손상이어야 한다.

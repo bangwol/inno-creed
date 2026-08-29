@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/config-kit"]
+members = [".", "crates/config-kit", "installer"]
 
 [package]
 name = "inno-creed"

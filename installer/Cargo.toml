@@ -1,0 +1,17 @@
+[package]
+name = "installer"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "installer"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+config-kit = { path = "../crates/config-kit" }
+eframe = "0.36.1"
+egui = "0.36.1"
+open = "5.4.2"
+rfd = "0.17.2"
+serde_json = "1.0.151"

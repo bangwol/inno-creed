@@ -13,7 +13,15 @@ Claude Desktop 앱(채팅·Cowork·Code 탭)에서 쓸 거라면, 아래 1~6번�
    - macOS: `inno-creed-installer-macos-arm64.zip`
    - Linux: `inno-creed-installer-linux-x86_64.zip` / `-linux-aarch64.zip`
 2. **압축을 통째로 풉니다.** 안에 `installer`(Windows는 `installer.exe`)와 `payload/` 폴더가 나란히 들어있는데, **이 둘을 같은 자리에 둔 채로** `installer`를 실행하세요 — `installer`만 다른 곳으로 옮기면 설치할 파일을 못 찾습니다.
-3. Windows에서 SmartScreen("Windows가 PC를 보호했습니다") 경고가 뜨면 **추가 정보 → 실행**을 누릅니다(미서명 배포판이라 뜨는 정상적인 경고입니다).
+3. 실행이 막히면 — 미서명 배포판이라 OS마다 한 번씩 걸립니다.
+   - **Windows**: SmartScreen("Windows가 PC를 보호했습니다") 경고 → **추가 정보 → 실행**.
+   - **macOS**: Gatekeeper가 "확인되지 않은 개발자"라며 막습니다. 터미널에서 압축 푼 폴더에 대고 한 줄:
+     ```sh
+     xattr -dr com.apple.quarantine .        # 압축 푼 폴더 안에서
+     ./installer
+     ```
+     (Finder에서 `installer`를 **우클릭 → 열기**로도 됩니다.)
+   - **Linux**: 압축 프로그램이 실행 권한을 떨어뜨렸다면 `chmod +x installer payload/inno-creed`.
 4. 화면 안내를 따라갑니다: 환영 → Claude Desktop 설정 파일 자동 감지 → 설치 위치 확인 → (Claude Desktop이 켜져 있으면 종료 요청) → 설치 → (Windows만) 확장 프로그램 연결 안내 → 완료.
 5. 완료 화면에 `doctor` 인증 확인 결과가 함께 뜹니다. Claude Desktop을 (다시) 켜면 채팅·Cowork·Code 탭에서 바로 도구를 쓸 수 있습니다.
 
@@ -66,6 +74,8 @@ https://github.com/zilhak/inno-creed
 | Linux aarch64 | `inno-creed-linux-aarch64` |
 | Windows x86_64 | `inno-creed-windows-x86_64.exe` |
 | **(Windows 권장) 확장 프로그램** | `inno-creed-extension.zip` — 4번에서 씁니다 |
+
+> 위는 **수동 설치용 맨 바이너리**입니다. GUI 인스톨러(`inno-creed-installer-<OS>.zip`, [0번](#0-비개발자라면--gui-인스톨러-권장))를 쓴다면 이 표의 파일은 받을 필요가 없습니다 — 인스톨러 zip이 `payload/` 안에 실행 파일을(Windows는 확장 프로그램까지) 이미 담고 있습니다.
 
 ---
 
@@ -168,7 +178,9 @@ claude mcp add inno-creed --scope user -- /절대경로/inno-creed          # Wi
 >
 > 확장 ID는 `manifest.json`의 고정 공개키(`key`)로 결정되므로 **어디에 풀든, 몇 번을 다시 로드하든 바뀌지 않습니다**(`hpabcmnjaahhdenpdmfjlmkfjljdldbf`). 2번이 등록하는 허용 origin이 이 ID라서, 그 값이 흔들리면 브릿지가 조용히 끊깁니다 — 그래서 키를 박아두었습니다.
 >
-> 소스에서 직접 쓰고 싶다면 저장소의 `extension/` 폴더를 그대로 로드해도 같습니다(zip은 그 폴더의 런타임 파일 `manifest.json`·`background.js`만 담은 것입니다).
+> 압축을 풀면 `manifest.json`·`background.js`·`icons/` 세 가지가 나옵니다. **셋 다 있어야 로드됩니다** — 매니페스트가 아이콘 파일을 선언하고 있어서, `icons/`를 지우면 Chrome이 로드 자체를 거부합니다.
+>
+> 소스에서 직접 쓰고 싶다면 저장소의 `extension/` 폴더를 그대로 로드해도 같습니다(zip은 그 폴더의 런타임 파일만 추린 것입니다).
 
 > Chrome/Edge 둘 다에서 쓰려면 익스텐션을 두 브라우저 각각에 로드하면 됩니다(같은 폴더를 그대로 쓰면 되고, native host 등록은 이미 양쪽 다 돼 있음).
 

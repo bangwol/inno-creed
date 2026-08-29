@@ -20,14 +20,24 @@ inno-creed (Rust MCP 서버, 헤드리스)
  ├─ util     도메인 무관 순수 함수(날짜 days_to_ymd/fmt_ymd · digits_only · JSON 필드 추출 json_str/s)
  ├─ client   GwClient: ensure_session(gw050A02 lazy 취득+10분 TTL 캐시) · 캘린더 목록 캐시(10분 TTL) · 사원 명부 캐시(30분 TTL) · 본인 표시정보 캐시(30분 TTL) · signed()로 헤더 4종 주입 · 전송 · 응답봉투 파싱 · companyInfo 조립
  ├─ error    도메인 공통 에러 타입 — NotOwner(소유권 위반) · InvalidInput(호출자 인자 오류)
+ ├─ doctor   `inno-creed doctor` — 위 진단 + 설정 파일 탐색 + 실제 인증 왕복 1회
  ├─ modules  resource(자원) · calendar(일정) · mail(메일) · board(게시판) · approval*(전자결재)
- │           org(조직) · attendance(근태) · search(통합검색) · submission_guide
+ │           org(조직) · person_group(사람 그룹) · attendance(근태) · search(통합검색) · submission_guide
  │           API 래퍼 + 파생 조회 + **소유권 가드 · read-back 검증**(`*_and_verify`)
  └─ mcp/     rmcp 서버(stdio)
     ├─ mod.rs   서버 골격: Amaranth · 라우터 합성(all_tools) · ensure_session · 에러 변환 · instructions
-    ├─ tools/   도구 49개 — 도메인 11개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·attendance·search)
-    └─ args/    도구 인자 스키마 — 도메인 8개. ⚠️ doc comment가 그대로 LLM 프롬프트가 된다
+    ├─ tools/   도구 53개 — 도메인 12개(resource·calendar·mail·board·approval{,_line,_submit,_meta}·org·person_group·attendance·search)
+    └─ args/    도구 인자 스키마 — 도메인 9개. ⚠️ doc comment가 그대로 LLM 프롬프트가 된다
 ```
+
+이 저장소는 **워크스페이스**다. 위 트리는 루트 패키지(`inno-creed`) 얘기고, 옆에 둘이 더 있다:
+
+| 크레이트 | 역할 |
+|---|---|
+| `crates/config-kit` | `claude_desktop_config.json` 탐지·백업·머지·원자적 쓰기. MCP 서버와 인스톨러가 같은 규칙을 쓰도록 뽑아낸 것 |
+| `installer` | 비개발자용 GUI 인스톨러(eframe). `--uninstall` 모드 · Windows "프로그램 추가/제거" 등록. 배포 zip은 `scripts/package-installer.{sh,ps1}`가 만든다 |
+
+`cargo build --release`는 **루트 패키지만** 만든다(워크스페이스 루트에 패키지가 있어서 기본 대상이 그것 하나다). 인스톨러는 `cargo build --release -p installer`로 따로 짓는다.
 
 - 구조 근거: MCP는 **실행층**, 크레덴셜만 외부(브라우저)에서 취득. 그래서 헤드리스로 돌아간다.
 - 서버 시작 순서: `creds::from_browser()`(크레덴셜 — env → 익스텐션 캐시 → Chrome → Edge(Win) → Firefox(비-Win) → 크레덴셜 파일) → stdio MCP 서브. [세션 정보](#4-authtoken-구조--세션-정보-lazy-취득--ttl-캐시)는 첫 도구 호출 시 `ensure_session()`이 lazy 취득(선취득 없음).

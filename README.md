@@ -227,7 +227,9 @@ cargo clippy --workspace -- -D warnings
 cargo test --workspace
 ```
 
-현재 기준선은 **테스트 전건 통과**입니다(clippy는 `src/creds.rs`의 기존 dead-code 경고 1건이 이미 있습니다 — 이 작업과 무관). 여기서 늘어나면 그 변경이 원인입니다.
+현재 기준선은 **테스트 전건 통과**, **clippy 경고 9건**입니다(2026-08-29 실측). 내역은 `src/native_host.rs`의 dead-code 1건과 `installer/`의 8건(`copy_installer_self` dead-code 1 + `collapsible_if` 6 + `trim_split_whitespace` 1)이고, 전부 이 크레이트들이 들어올 때부터 있던 것입니다. 여기서 **늘어나면** 그 변경이 원인입니다.
+
+> `-D warnings`를 붙였으니 이 상태에서는 clippy가 실패로 끝납니다. 경고를 새로 만들지 않았는지 보려면 개수를 위 기준선과 비교하세요.
 
 ### MCP 등록
 

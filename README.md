@@ -184,7 +184,20 @@ MCP 클라이언트로 실행할 땐 등록 설정의 `env` 블록에 넣으세�
 
 > 📖 **처음이거나 남에게 공유한다면 → [단계별 설치 가이드 `docs/INSTALL.md`](docs/INSTALL.md)** (OS별 절차 · Gatekeeper/SmartScreen 우회 · 문제 해결 포함). 아래는 요약입니다.
 
-### 프리빌트 바이너리 (권장)
+### GUI 인스톨러 (비개발자 권장)
+
+Claude Desktop(채팅·Cowork·Code 탭)에서 쓸 거라면, JSON을 직접 안 만져도 되는 GUI 인스톨러를 받으세요.
+
+| OS / arch | 파일 |
+|---|---|
+| macOS (Apple Silicon) | `inno-creed-installer-macos-arm64.zip` |
+| Linux x86_64 | `inno-creed-installer-linux-x86_64.zip` |
+| Linux aarch64 | `inno-creed-installer-linux-aarch64.zip` |
+| Windows x86_64 | `inno-creed-installer-windows-x86_64.zip` |
+
+압축을 풀면 나오는 `installer`(Windows는 `installer.exe`)를 실행하세요. **`installer`와 `payload/` 폴더를 같은 자리에 둔 채로 실행해야 합니다** — `installer`만 따로 옮기면 설치할 파일을 못 찾습니다. 자세한 화면별 안내는 [`docs/INSTALL.md`](docs/INSTALL.md) 참고. Claude Code CLI 전용으로만 쓸 거라면 아래 프리빌트 바이너리 방식이 더 간단합니다.
+
+### 프리빌트 바이너리
 
 [**릴리즈**](https://github.com/zilhak/inno-creed/releases/latest)에서 OS에 맞는 바이너리를 내려받으세요.
 
@@ -207,14 +220,14 @@ cargo build --release   # → target/release/inno-creed (Windows는 inno-creed.e
 
 **Rust 1.96+** (edition 2024, 번들 `libsqlite3-sys`가 최신 toolchain 요구)와 **C 컴파일러**(rusqlite 번들 SQLite 컴파일용)가 필요합니다.
 
-**커밋 전에는 다음 두 명령을 돌립니다.** CI가 없어 사람이 놓치면 그대로 쌓입니다.
+**커밋 전에는 다음 두 명령을 돌립니다.** CI가 없어 사람이 놓치면 그대로 쌓입니다. `crates/config-kit`·`installer`도 포함하려면 `--workspace`가 필요합니다.
 
 ```sh
-cargo clippy --lib -- -D warnings
-cargo test --lib
+cargo clippy --workspace -- -D warnings
+cargo test --workspace
 ```
 
-현재 기준선은 **clippy 경고 0건 · 테스트 전건 통과**입니다. 여기서 늘어나면 그 변경이 원인입니다.
+현재 기준선은 **테스트 전건 통과**입니다(clippy는 `src/creds.rs`의 기존 dead-code 경고 1건이 이미 있습니다 — 이 작업과 무관). 여기서 늘어나면 그 변경이 원인입니다.
 
 ### MCP 등록
 

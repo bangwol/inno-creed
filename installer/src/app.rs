@@ -443,12 +443,11 @@ impl InstallerApp {
                 .add(egui::Button::new("제거").min_size(egui::vec2(120.0, 32.0)))
                 .clicked()
             {
-                self.screen = if config_kit::is_claude_desktop_running() {
-                    Screen::UninstallAppRunning
+                if config_kit::is_claude_desktop_running() {
+                    self.screen = Screen::UninstallAppRunning;
                 } else {
                     self.do_uninstall();
-                    Screen::UninstallDone
-                };
+                }
             }
         });
     }
@@ -460,40 +459,54 @@ impl InstallerApp {
             ui.label("설정 파일을 안전하게 고치려면 Claude Desktop이 완전히 꺼져 있어야 합니다.");
             ui.add_space(20.0);
             if ui.button("다시 확인").clicked() {
-                self.screen = if config_kit::is_claude_desktop_running() {
-                    Screen::UninstallAppRunning
+                if config_kit::is_claude_desktop_running() {
+                    self.screen = Screen::UninstallAppRunning;
                 } else {
                     self.do_uninstall();
-                    Screen::UninstallDone
-                };
+                }
             }
         });
     }
 
+    /// **화면 전환까지 여기서 끝낸다.** 예전에는 호출부가
+    /// `self.do_uninstall(); Screen::UninstallDone` 꼴로 화면을 덮어써서, 여기서
+    /// `Screen::Error`를 세워도 곧바로 "제거 완료"로 지워졌다 — 실패가 성공으로
+    /// 보고됐다. 그래서 반환값 대신 `self.screen`을 직접 세운다.
     fn do_uninstall(&mut self) {
-        if let Some(config_path) = &self.config_path {
-            let installer_copy = self.install_dir.join("installer.exe");
-            if let Err(e) = install::perform_uninstall(config_path, &self.install_dir, &installer_copy) {
-                self.screen = Screen::Error(format!("제거 중 오류가 발생했습니다: {e:#}"));
-                return;
-            }
-            #[cfg(target_os = "windows")]
-            {
-                registry::remove_uninstall_entry();
-                install::schedule_self_delete(&installer_copy, &self.install_dir);
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                install::schedule_self_delete(&installer_copy, &self.install_dir);
-            }
+        let installer_copy = self.install_dir.join("installer.exe");
+        // config를 못 찾았어도 파일 삭제는 진행한다(확인 화면에서 "등록 해제는
+        // 건너뜁니다"라고 이미 예고한 동작이다).
+        if let Err(e) = install::perform_uninstall(
+            self.config_path.as_deref(),
+            &self.install_dir,
+            &installer_copy,
+        ) {
+            self.screen = Screen::Error(format!("제거 중 오류가 발생했습니다: {e:#}"));
+            return;
         }
+        #[cfg(target_os = "windows")]
+        registry::remove_uninstall_entry();
+        install::schedule_self_delete(&installer_copy, &self.install_dir);
+        self.screen = Screen::UninstallDone;
     }
 
     fn uninstall_done_screen(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.heading("제거 완료");
             ui.add_space(12.0);
-            ui.label("inno-creed 등록을 지웠습니다. Claude Desktop을 다시 실행하면 반영됩니다.");
+            // 등록 해제를 실제로 했을 때만 그렇게 말한다 — config를 못 찾은 채로
+            // "등록을 지웠습니다"라고 하면 남아있는 등록을 없는 것으로 착각한다.
+            if self.config_path.is_some() {
+                ui.label("inno-creed 등록을 지우고 설치된 파일을 삭제했습니다. Claude Desktop을 다시 실행하면 반영됩니다.");
+            } else {
+                ui.label("설치된 파일을 삭제했습니다.");
+                ui.add_space(8.0);
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 90, 60),
+                    "Claude Desktop 설정 파일을 찾지 못해 등록은 그대로 남아 있습니다 —\n\
+                     설정에서 inno-creed 항목을 직접 지워주세요.",
+                );
+            }
             ui.add_space(8.0);
             ui.small("이 창은 닫아도 됩니다.");
         });

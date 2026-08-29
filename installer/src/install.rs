@@ -130,8 +130,17 @@ pub fn copy_installer_self(install_dir: &Path, installer_exe_name: &str) -> std:
 /// 등록 해제 + inno-creed 실행 파일·확장 폴더 삭제. **installer 자기 자신은 지우지
 /// 않는다** — Windows는 실행 중인 exe를 스스로 지울 수 없다. 자기 자신 정리는
 /// `schedule_self_delete`가 프로세스 종료 후 별도로 처리한다.
-pub fn perform_uninstall(config_path: &Path, install_dir: &Path, keep: &Path) -> anyhow::Result<()> {
-    if config_path.exists() {
+/// `config_path`가 `None`이면 등록 해제만 건너뛰고 **파일 삭제는 그대로 한다** —
+/// Claude Desktop 설정을 못 찾았다는 이유로 설치된 파일까지 남기면, 사용자는
+/// "제거했다"는 화면을 보고도 디스크에 그대로 남은 폴더를 나중에 발견한다.
+pub fn perform_uninstall(
+    config_path: Option<&Path>,
+    install_dir: &Path,
+    keep: &Path,
+) -> anyhow::Result<()> {
+    if let Some(config_path) = config_path
+        && config_path.exists()
+    {
         let _ = config_kit::backup(config_path);
         let mut root = config_kit::read_json(config_path)?;
         config_kit::remove_inno_creed_entry(&mut root);
@@ -337,7 +346,7 @@ mod tests {
         assert!(result.exe_path.exists());
 
         let keep = install_dir.join("installer.exe"); // 이 테스트에선 실제로 존재하지 않음
-        perform_uninstall(&config_path, &install_dir, &keep).unwrap();
+        perform_uninstall(Some(&config_path), &install_dir, &keep).unwrap();
 
         assert!(!result.exe_path.exists(), "설치된 inno-creed 실행 파일은 지워져야 함");
         let written = config_kit::read_json(&config_path).unwrap();
@@ -358,10 +367,31 @@ mod tests {
         std::fs::write(install_dir.join("inno-creed.exe"), b"bin").unwrap();
 
         let config_path = work.join("claude_desktop_config.json"); // 존재하지 않아도 됨
-        perform_uninstall(&config_path, &install_dir, &keep).unwrap();
+        perform_uninstall(Some(&config_path), &install_dir, &keep).unwrap();
 
         assert!(keep.exists(), "keep으로 지정한 파일은 남아있어야 함");
         assert!(!install_dir.join("inno-creed.exe").exists());
+
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    /// Claude Desktop 설정을 못 찾은 환경(config_path=None)에서도 설치된 파일은
+    /// 지워져야 한다. 예전에는 이 경우 제거가 통째로 no-op이면서 화면만
+    /// "제거 완료"가 떴다.
+    #[test]
+    fn uninstall_without_config_still_deletes_installed_files() {
+        let work = temp_dir("uninstall-noconfig");
+        let install_dir = work.join("installed");
+        std::fs::create_dir_all(&install_dir).unwrap();
+        std::fs::write(install_dir.join("inno-creed.exe"), b"bin").unwrap();
+        std::fs::create_dir_all(install_dir.join("extension")).unwrap();
+        std::fs::write(install_dir.join("extension/manifest.json"), b"{}").unwrap();
+
+        let keep = install_dir.join("installer.exe"); // 존재하지 않음
+        perform_uninstall(None, &install_dir, &keep).unwrap();
+
+        assert!(!install_dir.join("inno-creed.exe").exists());
+        assert!(!install_dir.join("extension").exists());
 
         std::fs::remove_dir_all(&work).ok();
     }

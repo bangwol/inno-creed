@@ -4,6 +4,19 @@
 //! 이미 찾은 구체적인 경로만 받는다. 그래야 가짜 경로를 넣어 로직만 따로 테스트할 수 있다.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// GUI 앱에서 콘솔 프로그램(reg.exe, inno-creed.exe의 doctor 등)을 부르면 순간적으로
+/// 검은 콘솔창이 깜빡인다 — Windows에서만 그 창을 안 띄우게 한다.
+fn no_console_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 pub struct InstallResult {
     pub exe_path: PathBuf,
@@ -39,14 +52,18 @@ pub fn perform_install(
     let mut extension_dir = None;
     if let Some(src_ext) = src_extension_dir.filter(|p| p.exists()) {
         let dest_ext = install_dir.join("extension");
+        // 업그레이드 시 이전 버전이 넣어둔 파일이 새 버전엔 없을 수도 있다 — 그냥
+        // 겹쳐 쓰면 그런 파일이 영영 남는다. 지우고 다시 채워 항상 새 payload와
+        // 정확히 같은 상태로 만든다.
+        if dest_ext.exists() {
+            std::fs::remove_dir_all(&dest_ext)?;
+        }
         copy_dir_all(src_ext, &dest_ext)?;
         // native_host.rs가 이미 구현한 등록 절차를 그대로 재사용 — installer가
         // 레지스트리/매니페스트 작성 로직을 다시 구현하지 않는다. (Windows 전용 동작)
         #[cfg(target_os = "windows")]
         {
-            let _ = std::process::Command::new(&dest_bin)
-                .arg("--install-extension-host")
-                .status();
+            let _ = no_console_window(Command::new(&dest_bin).arg("--install-extension-host")).status();
         }
         extension_dir = Some(dest_ext);
     }
@@ -73,9 +90,24 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 실행 파일의 `--version` 출력에서 버전 문자열만 뽑는다("inno-creed 2.0.0" → "2.0.0").
+/// 파일이 없거나 실행이 안 되면 `None` — 그건 "처음 설치"로 다루지 여기서 에러를
+/// 내지 않는다. 기존 설치가 있는지, 있다면 몇 버전인지 설치 전에 보여주기 위한 것이다.
+pub fn read_version(exe_path: &Path) -> Option<String> {
+    if !exe_path.exists() {
+        return None;
+    }
+    let out = no_console_window(Command::new(exe_path).arg("--version")).output().ok()?;
+    parse_version_output(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_version_output(s: &str) -> Option<String> {
+    s.trim().split_whitespace().last().map(str::to_string)
+}
+
 /// 설치된 inno-creed의 `doctor`를 실행해 결과 전문을 돌려준다.
 pub fn run_doctor(exe_path: &Path) -> anyhow::Result<String> {
-    let out = std::process::Command::new(exe_path).arg("doctor").output()?;
+    let out = no_console_window(Command::new(exe_path).arg("doctor")).output()?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     if !out.stderr.is_empty() {
         text.push_str("\n--- stderr ---\n");
@@ -129,8 +161,6 @@ pub fn perform_uninstall(config_path: &Path, install_dir: &Path, keep: &Path) ->
 /// installer.exe 한 파일만 남는 정도다.
 #[cfg(target_os = "windows")]
 pub fn schedule_self_delete(installer_exe: &Path, install_dir: &Path) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = installer_exe.display();
     let dir = install_dir.display();
     let cmd = format!(
@@ -139,10 +169,7 @@ pub fn schedule_self_delete(installer_exe: &Path, install_dir: &Path) {
          (ping 127.0.0.1 -n 5 >nul & del /f /q \"{exe}\") & \
          rmdir \"{dir}\" 2>nul"
     );
-    let _ = std::process::Command::new("cmd")
-        .args(["/C", &cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    let _ = no_console_window(Command::new("cmd").args(["/C", &cmd])).spawn();
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -161,6 +188,54 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("installer-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn parse_version_output_takes_last_token() {
+        assert_eq!(parse_version_output("inno-creed 2.0.0\n"), Some("2.0.0".to_string()));
+        assert_eq!(parse_version_output("2.0.0"), Some("2.0.0".to_string()));
+        assert_eq!(parse_version_output(""), None);
+    }
+
+    #[test]
+    fn read_version_of_missing_file_is_none() {
+        let work = temp_dir("version-missing");
+        assert_eq!(read_version(&work.join("does-not-exist")), None);
+        std::fs::remove_dir_all(&work).ok();
+    }
+
+    #[test]
+    fn upgrade_replaces_stale_extension_files() {
+        let work = temp_dir("upgrade-ext");
+        let src_bin = work.join("fake-inno-creed");
+        std::fs::write(&src_bin, b"fake").unwrap();
+        let config_path = work.join("claude_desktop_config.json");
+        let install_dir = work.join("installed");
+
+        // 1차 설치: manifest.json + old-file.txt(구버전에만 있던 파일)
+        let ext_src_v1 = work.join("ext-v1");
+        std::fs::create_dir_all(&ext_src_v1).unwrap();
+        std::fs::write(ext_src_v1.join("manifest.json"), b"v1").unwrap();
+        std::fs::write(ext_src_v1.join("old-file.txt"), b"legacy").unwrap();
+        perform_install(&config_path, &install_dir, &src_bin, Some(&ext_src_v1), "inno-creed").unwrap();
+        assert!(install_dir.join("extension/old-file.txt").exists());
+
+        // 2차 설치(업그레이드): old-file.txt가 없는 새 payload로 덮어쓴다.
+        let ext_src_v2 = work.join("ext-v2");
+        std::fs::create_dir_all(&ext_src_v2).unwrap();
+        std::fs::write(ext_src_v2.join("manifest.json"), b"v2").unwrap();
+        perform_install(&config_path, &install_dir, &src_bin, Some(&ext_src_v2), "inno-creed").unwrap();
+
+        assert!(
+            !install_dir.join("extension/old-file.txt").exists(),
+            "구버전 잔재 파일이 지워져야 함"
+        );
+        assert_eq!(
+            std::fs::read(install_dir.join("extension/manifest.json")).unwrap(),
+            b"v2"
+        );
+
+        std::fs::remove_dir_all(&work).ok();
     }
 
     #[test]

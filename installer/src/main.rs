@@ -2,6 +2,10 @@
 // 배포 zip에 installer와 나란히 놓인 payload/를 찾아 설치하고, config-kit으로
 // claude_desktop_config.json에 등록한다.
 
+// 기본 "콘솔" 서브시스템으로 빌드되면 GUI 창과 별개로 검은 콘솔창이 뒤에 함께 뜬다
+// (Windows 전용 속성 — 다른 OS는 원래 이런 구분이 없어 그냥 무시된다).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod app;
 mod install;
 mod payload;

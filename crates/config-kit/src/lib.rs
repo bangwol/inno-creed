@@ -65,6 +65,43 @@ pub fn read_json(path: &Path) -> anyhow::Result<Value> {
     Ok(serde_json::from_str(&raw)?)
 }
 
+/// `desktop_config_candidates()`가 내놓은 경로 하나를 실제로 검사한 결과.
+/// **파일이 그 자리에 있다는 것과, 그게 진짜 쓸 수 있는 Claude Desktop 설정이라는 것은
+/// 다르다** — MSIX 패키지 폴더가 남아있는데 안이 깨져 있거나, 다른 프로그램이 우연히
+/// 같은 이름의 파일을 만들어뒀을 수도 있다. 존재 여부만 보고 골랐다가 나중에 설치
+/// 단계에서야 파싱 실패로 터지면 원인을 알기 어렵다 — 감지 시점에 미리 알려준다.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigCheck {
+    /// 경로 자체가 없다.
+    Missing,
+    /// 파일은 있는데 JSON으로 못 읽는다(깨졌거나 다른 형식).
+    ParseFailed,
+    /// JSON은 읽히지만 `preferences`·`coworkUserFilesPath`·`mcpServers` 중 아무것도
+    /// 없다 — Claude Desktop이 만든 파일이 아닐 가능성이 있다는 뜻(신뢰도 낮음).
+    ParsedButUnfamiliar,
+    /// 파싱도 되고 낯익은 키도 있다 — 실제 Claude Desktop 설정으로 볼 수 있다.
+    LooksLikeClaudeDesktop,
+}
+
+pub fn inspect_config(path: &Path) -> ConfigCheck {
+    if !path.exists() {
+        return ConfigCheck::Missing;
+    }
+    match read_json(path) {
+        Err(_) => ConfigCheck::ParseFailed,
+        Ok(v) => {
+            let familiar = ["preferences", "coworkUserFilesPath", "mcpServers"]
+                .iter()
+                .any(|k| v.get(k).is_some());
+            if familiar {
+                ConfigCheck::LooksLikeClaudeDesktop
+            } else {
+                ConfigCheck::ParsedButUnfamiliar
+            }
+        }
+    }
+}
+
 /// `mcpServers.inno-creed.command`만 갱신한다. 그 외 키는 절대 건드리지 않는다 —
 /// Claude Desktop이 같은 파일에 `preferences`(UI 상태, 6단계 이상 중첩) 등을 저장하므로,
 /// 구조체로 역직렬화했다가 다시 쓰면 모르는 키가 전부 사라진다. 그래서 `Value`를 그대로 다룬다.
@@ -182,6 +219,42 @@ fn exe_path_looks_like_claude_desktop(path_lower: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_file(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("config-kit-inspect-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("claude_desktop_config.json")
+    }
+
+    #[test]
+    fn inspect_missing_file() {
+        let path = temp_file("missing");
+        assert_eq!(inspect_config(&path), ConfigCheck::Missing);
+    }
+
+    #[test]
+    fn inspect_broken_json() {
+        let path = temp_file("broken");
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        assert_eq!(inspect_config(&path), ConfigCheck::ParseFailed);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn inspect_valid_but_unfamiliar_json() {
+        let path = temp_file("unfamiliar");
+        std::fs::write(&path, b"{\"hello\": \"world\"}").unwrap();
+        assert_eq!(inspect_config(&path), ConfigCheck::ParsedButUnfamiliar);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn inspect_real_claude_desktop_shape() {
+        let path = temp_file("real");
+        std::fs::write(&path, serde_json::to_vec(&epitaxy_fixture()).unwrap()).unwrap();
+        assert_eq!(inspect_config(&path), ConfigCheck::LooksLikeClaudeDesktop);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
 
     // 개발자 컴퓨터에서 실측한 실제 경로. Claude Code CLI와 Claude Desktop이 둘 다 켜져
     // 있는 상태에서 `Get-Process | Select ProcessName, Path`로 확인 — 이름은 둘 다

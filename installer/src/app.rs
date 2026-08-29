@@ -22,23 +22,52 @@ enum Screen {
 pub struct InstallerApp {
     screen: Screen,
     config_path: Option<PathBuf>,
+    config_confidence: Option<config_kit::ConfigCheck>,
     config_candidates: Vec<PathBuf>,
     install_dir: PathBuf,
+    existing_version: Option<String>,
+    new_version: Option<String>,
     install_result: Option<install::InstallResult>,
     doctor_output: Option<String>,
     doctor_ok: bool,
     doctor_expanded: bool,
 }
 
+/// 후보 중 실제로 쓸 만한 것을 고른다. **존재만 하는 파일을 무조건 집지 않는다** —
+/// MSIX 패키지 폴더가 낡아 남아있거나 내용이 깨진 파일을 그대로 골랐다가 설치
+/// 단계에서야 파싱 실패로 터지면 원인을 알기 어렵다. `LooksLikeClaudeDesktop`을
+/// 최우선으로 하고, 그게 하나도 없을 때만 `ParsedButUnfamiliar`로 물러선다.
+fn pick_best_candidate(candidates: &[PathBuf]) -> Option<(PathBuf, config_kit::ConfigCheck)> {
+    let mut fallback = None;
+    for p in candidates {
+        match config_kit::inspect_config(p) {
+            config_kit::ConfigCheck::LooksLikeClaudeDesktop => {
+                return Some((p.clone(), config_kit::ConfigCheck::LooksLikeClaudeDesktop));
+            }
+            check @ config_kit::ConfigCheck::ParsedButUnfamiliar if fallback.is_none() => {
+                fallback = Some((p.clone(), check));
+            }
+            _ => {}
+        }
+    }
+    fallback
+}
+
 impl Default for InstallerApp {
     fn default() -> Self {
         let candidates = config_kit::desktop_config_candidates();
-        let found = candidates.iter().find(|p| p.exists()).cloned();
+        let (config_path, config_confidence) = match pick_best_candidate(&candidates) {
+            Some((p, c)) => (Some(p), Some(c)),
+            None => (None, None),
+        };
         Self {
             screen: Screen::Welcome,
-            config_path: found,
+            config_path,
+            config_confidence,
             config_candidates: candidates,
             install_dir: payload::default_install_dir(),
+            existing_version: None,
+            new_version: None,
             install_result: None,
             doctor_output: None,
             doctor_ok: false,
@@ -111,6 +140,9 @@ impl InstallerApp {
                 if let Err(e) = payload::verify_payload_present() {
                     self.screen = Screen::Error(e);
                 } else {
+                    let dest_bin = self.install_dir.join(payload::inno_creed_binary_name());
+                    self.existing_version = install::read_version(&dest_bin);
+                    self.new_version = install::read_version(&payload::payload_binary_path());
                     self.screen = Screen::Confirm;
                 }
             }
@@ -125,6 +157,27 @@ impl InstallerApp {
         match &self.config_path {
             Some(p) => {
                 ui.monospace(p.display().to_string());
+                match &self.config_confidence {
+                    Some(config_kit::ConfigCheck::LooksLikeClaudeDesktop) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(40, 140, 60),
+                            "✅ 파일을 직접 열어 확인했습니다 — Claude Desktop 설정이 맞습니다.",
+                        );
+                    }
+                    Some(config_kit::ConfigCheck::ParsedButUnfamiliar) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 140, 30),
+                            "⚠️ 파일은 읽히지만 낯선 내용입니다 — 다른 프로그램이 만든 파일일 수도 있습니다. 확실하지 않으면 [직접 선택...]으로 다시 골라주세요.",
+                        );
+                    }
+                    Some(config_kit::ConfigCheck::ParseFailed) => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(200, 90, 60),
+                            "❌ 파일이 있지만 JSON으로 읽히지 않습니다 — 이대로 설치하면 실패합니다. [직접 선택...]으로 다른 파일을 고르거나, 파일을 열어 문법 오류를 먼저 고쳐주세요.",
+                        );
+                    }
+                    _ => {}
+                }
             }
             None => {
                 ui.colored_label(
@@ -142,6 +195,7 @@ impl InstallerApp {
                 .set_file_name("claude_desktop_config.json")
                 .pick_file()
             {
+                self.config_confidence = Some(config_kit::inspect_config(&picked));
                 self.config_path = Some(picked);
             }
         }
@@ -149,9 +203,29 @@ impl InstallerApp {
         ui.add_space(16.0);
         ui.label("inno-creed를 놓을 위치:");
         ui.monospace(self.install_dir.display().to_string());
+        match (&self.existing_version, &self.new_version) {
+            (Some(old), Some(new)) if old == new => {
+                ui.label(format!("이미 v{old}이 설치돼 있습니다 — 같은 버전을 다시 설치합니다."));
+            }
+            (Some(old), Some(new)) => {
+                ui.colored_label(egui::Color32::from_rgb(40, 140, 60), format!("업데이트: v{old} → v{new}"));
+            }
+            (None, Some(new)) => {
+                ui.small(format!("새로 설치합니다 (v{new}).")); // 이 위치에 처음 설치
+            }
+            (Some(old), None) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(200, 90, 60),
+                    format!("⚠️ 기존 v{old}이 있지만 새 버전 확인에 실패했습니다."),
+                );
+            }
+            (None, None) => {}
+        }
         if ui.button("다른 폴더 선택...").clicked() {
             if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                 self.install_dir = dir.join("inno-creed");
+                let dest_bin = self.install_dir.join(payload::inno_creed_binary_name());
+                self.existing_version = install::read_version(&dest_bin);
             }
         }
 

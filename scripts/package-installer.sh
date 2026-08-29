@@ -51,6 +51,29 @@ mkdir -p "$OUT_DIR"
 ZIP_PATH="$(cd "$OUT_DIR" && pwd)/inno-creed-installer-${TARGET_NAME}.zip"
 rm -f "$ZIP_PATH"
 
-(cd "$STAGE" && zip -r -q "$ZIP_PATH" .)
+# `zip`은 최소 설치된 리눅스에 없는 경우가 있다(실제로 빌드 머신 한 대가 그랬다).
+# python3는 있으므로 폴백을 둔다 — 다만 **실행 권한을 zip 엔트리에 직접 실어야**
+# 한다. 기본 writestr은 모드를 0으로 남겨서, 풀면 installer가 실행 불가가 된다.
+if command -v zip >/dev/null 2>&1; then
+  (cd "$STAGE" && zip -r -q "$ZIP_PATH" .)
+elif command -v python3 >/dev/null 2>&1; then
+  python3 - "$STAGE" "$ZIP_PATH" <<'PY'
+import os, sys, zipfile
+
+stage, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for root, _, files in os.walk(stage):
+        for name in sorted(files):
+            full = os.path.join(root, name)
+            info = zipfile.ZipInfo(os.path.relpath(full, stage).replace(os.sep, "/"))
+            info.external_attr = (os.stat(full).st_mode & 0xFFFF) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            with open(full, "rb") as f:
+                z.writestr(info, f.read())
+PY
+else
+  echo "zip 또는 python3 중 하나가 필요합니다." >&2
+  exit 1
+fi
 
 echo "만든 파일: $ZIP_PATH"

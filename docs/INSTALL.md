@@ -25,7 +25,20 @@ Claude Desktop 앱(채팅·Cowork·Code 탭)에서 쓸 거라면, 아래 1~6번�
 
 ---
 
-## 0-1. 전제 조건
+## 0-1. Claude Code CLI(터미널) 사용자라면 — 그냥 부탁하세요
+
+설치 명령을 몰라도 됩니다. Claude Code를 켜고, 이 저장소 GitHub 주소와 함께 설치를 부탁하세요.
+
+```
+https://github.com/zilhak/inno-creed
+이 MCP 설치해줘
+```
+
+그 후, Claude의 안내에 따라 확장 프로그램을 설치하세요(Windows 권장 — [4번](#4-크레덴셜-연결--chromeedge-확장-프로그램-windows-권장) 참고).
+
+---
+
+## 0-2. 전제 조건
 
 - **MCP 클라이언트** — [Claude Code](https://claude.com/claude-code)(권장) 또는 stdio MCP를 지원하는 클라이언트. 이게 없으면 바이너리를 실행해도 아무 일도 안 합니다(입력을 기다리다 종료).
 - **로그인된 브라우저** — Chrome/Edge 또는 Firefox로 `https://gw.innogrid.com` 에 로그인된 **데스크톱** 환경. (헤드리스 서버·외부인 사용 불가)
@@ -142,11 +155,17 @@ claude mcp add inno-creed --scope user -- /절대경로/inno-creed          # Wi
    ```sh
    inno-creed --install-extension-host
    ```
-3. `chrome://extensions`(또는 `edge://extensions`)를 엽니다.
-4. 우측 상단 **개발자 모드**를 켭니다.
-5. **압축해제된 확장 프로그램을 로드합니다** → 1번에서 압축을 푼 `inno-creed-extension` 폴더를 선택합니다.
+3. 확장 프로그램 관리 화면을 엽니다.
+   - **Chrome**: 주소창에 `chrome://extensions` 입력, 또는 툴바 오른쪽 위 퍼즐 아이콘 → **확장 프로그램 관리**.
+   - **Edge**: 주소창에 `edge://extensions` 입력, 또는 `…` 메뉴 → **확장**.
+4. **개발자 모드**를 켭니다. **Chrome은 화면 우측 상단**, **Edge는 화면 좌측 하단**에 토글이 있습니다(둘 다 껐다 켜져 있는지 헷갈리기 쉬우니 위치를 참고하세요).
+5. **압축해제된 확장 프로그램을 로드합니다**(Chrome은 이 이름 그대로, Edge는 **압축 풀린 파일 로드**) → 1번에서 압축을 푼 `inno-creed-extension` 폴더를 선택합니다. 목록에 "inno-creed 크레덴셜 브릿지" 카드가 뜨고 토글이 켜져 있으면 성공입니다.
 6. `https://gw.innogrid.com`에 로그인돼 있으면(또는 방금 로그인하면) 자동으로 크레덴셜이 전달됩니다. 이후로도 로그인·로그아웃할 때마다 자동으로 동기화됩니다 — 매번 다시 로드할 필요 없습니다.
 
+> ⚠️ **Edge를 새로 시작하면 "개발자 모드에서 확장 사용 해제" 경고 팝업이 뜰 수 있습니다.** 여기서 **[확장 사용 해제]를 누르면 방금 설치한 확장이 꺼집니다** — 이 버튼은 누르지 말고 **[나중에]**를 누르세요. (Edge가 개발자 모드 확장 전체에 주기적으로 띄우는 일반적인 경고이지, inno-creed에 문제가 있다는 뜻이 아닙니다.)
+>
+> 카드에 "서비스 워커: 비활성"이라고 떠도 정상입니다 — 요청이 올 때만 깨어나는 방식이라 평소엔 비활성 상태입니다.
+>
 > 확장 ID는 `manifest.json`의 고정 공개키(`key`)로 결정되므로 **어디에 풀든, 몇 번을 다시 로드하든 바뀌지 않습니다**(`hpabcmnjaahhdenpdmfjlmkfjljdldbf`). 2번이 등록하는 허용 origin이 이 ID라서, 그 값이 흔들리면 브릿지가 조용히 끊깁니다 — 그래서 키를 박아두었습니다.
 >
 > 소스에서 직접 쓰고 싶다면 저장소의 `extension/` 폴더를 그대로 로드해도 같습니다(zip은 그 폴더의 런타임 파일 `manifest.json`·`background.js`만 담은 것입니다).

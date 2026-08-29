@@ -140,13 +140,13 @@ async fn verify(creds: Option<crate::creds::Creds>) -> anyhow::Result<()> {
 /// `%APPDATA%\Claude`가 아예 없고, 실제 경로에 든 패키지 이름(`Claude_pzs8sxrjxfjjc`)은
 /// 환경에 따라 다르다. 문서에 적으면 틀릴 수 있는 값이라 여기서 훑는다.
 fn report_desktop_configs() {
-    let found: Vec<PathBuf> = desktop_config_candidates()
+    let found: Vec<PathBuf> = config_kit::desktop_config_candidates()
         .into_iter()
         .filter(|p| p.exists())
         .collect();
     if found.is_empty() {
         println!("  찾지 못했습니다. Claude Desktop을 한 번 실행하면 생성됩니다.");
-        for p in desktop_config_candidates() {
+        for p in config_kit::desktop_config_candidates() {
             println!("    (확인한 경로) {}", p.display());
         }
         return;
@@ -200,49 +200,4 @@ fn report_entry(v: &serde_json::Value) {
             println!("    env: {} (값은 표시하지 않습니다)", keys.join(", "));
         }
     }
-}
-
-#[cfg(target_os = "macos")]
-fn desktop_config_candidates() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    vec![
-        PathBuf::from(home).join("Library/Application Support/Claude/claude_desktop_config.json"),
-    ]
-}
-
-#[cfg(target_os = "linux")]
-fn desktop_config_candidates() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-    };
-    vec![PathBuf::from(home).join(".config/Claude/claude_desktop_config.json")]
-}
-
-#[cfg(target_os = "windows")]
-fn desktop_config_candidates() -> Vec<PathBuf> {
-    const LEAF: &str = "Claude\\claude_desktop_config.json";
-    let mut out = Vec::new();
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        out.push(PathBuf::from(appdata).join(LEAF));
-    }
-    // MSIX(Microsoft Store)판은 위 경로가 **존재하지 않는다**. 실제 경로는 패키지별
-    // LocalCache 아래에 있고 패키지 폴더 이름이 환경마다 다르므로 훑어서 찾는다.
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        let packages = PathBuf::from(local).join("Packages");
-        if let Ok(entries) = std::fs::read_dir(&packages) {
-            for e in entries.flatten() {
-                if e.file_name().to_string_lossy().starts_with("Claude_") {
-                    out.push(e.path().join("LocalCache\\Roaming").join(LEAF));
-                }
-            }
-        }
-    }
-    out
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn desktop_config_candidates() -> Vec<PathBuf> {
-    Vec::new()
 }

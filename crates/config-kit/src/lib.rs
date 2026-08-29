@@ -1,0 +1,233 @@
+//! Claude Desktop 설정 파일(`claude_desktop_config.json`) 탐지·머지 공유 로직.
+//!
+//! inno-creed 본체(`doctor`)와, 별도로 배포되는 GUI 인스톨러가 이 크레이트를 함께 써서
+//! 경로 탐지·JSON 머지 로직이 두 산출물에서 서로 어긋나지 않게 한다. 인스톨러는
+//! inno-creed 실행 파일과 완전히 분리된 별개 바이너리이지만, 이 로직만은 하나를 공유한다.
+
+use serde_json::{Value, json};
+use std::io;
+use std::path::{Path, PathBuf};
+
+/// Claude Desktop config 파일이 있을 만한 경로 후보를 OS별로 훑는다.
+///
+/// 경로를 하드코딩하지 않는 이유: MSIX(Microsoft Store)판은 패키지별 폴더 이름이
+/// 환경마다 달라서(`Claude_<hash>`) 실제로 디렉터리를 뒤져야 하고, Anthropic이 과거
+/// 앱 데이터 경로를 한 번 옮긴 전례가 있다 — 고정 경로를 문서/코드에 박아두면 언젠가 틀린다.
+#[cfg(target_os = "macos")]
+pub fn desktop_config_candidates() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    vec![PathBuf::from(home).join("Library/Application Support/Claude/claude_desktop_config.json")]
+}
+
+#[cfg(target_os = "linux")]
+pub fn desktop_config_candidates() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    vec![PathBuf::from(home).join(".config/Claude/claude_desktop_config.json")]
+}
+
+#[cfg(target_os = "windows")]
+pub fn desktop_config_candidates() -> Vec<PathBuf> {
+    const LEAF: &str = "Claude\\claude_desktop_config.json";
+    let mut out = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        out.push(PathBuf::from(appdata).join(LEAF));
+    }
+    // MSIX(Microsoft Store)판은 위 경로가 **존재하지 않는다**. 실제 경로는 패키지별
+    // LocalCache 아래에 있고 패키지 폴더 이름이 환경마다 다르므로 훑어서 찾는다.
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let packages = PathBuf::from(local).join("Packages");
+        if let Ok(entries) = std::fs::read_dir(&packages) {
+            for e in entries.flatten() {
+                if e.file_name().to_string_lossy().starts_with("Claude_") {
+                    out.push(e.path().join("LocalCache\\Roaming").join(LEAF));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+pub fn desktop_config_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// 파일을 읽어 JSON으로 파싱한다. 파일이 없으면 빈 객체를 돌려준다(신규 등록 대비).
+pub fn read_json(path: &Path) -> anyhow::Result<Value> {
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let raw = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+/// `mcpServers.inno-creed.command`만 갱신한다. 그 외 키는 절대 건드리지 않는다 —
+/// Claude Desktop이 같은 파일에 `preferences`(UI 상태, 6단계 이상 중첩) 등을 저장하므로,
+/// 구조체로 역직렬화했다가 다시 쓰면 모르는 키가 전부 사라진다. 그래서 `Value`를 그대로 다룬다.
+pub fn merge_inno_creed_entry(root: &mut Value, exe_path: &Path) {
+    if !root.is_object() {
+        *root = json!({});
+    }
+    let obj = root.as_object_mut().expect("방금 object로 만듦");
+    let servers = obj.entry("mcpServers").or_insert_with(|| json!({}));
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+    servers.as_object_mut().expect("방금 object로 만듦").insert(
+        "inno-creed".to_string(),
+        json!({ "command": exe_path.to_string_lossy() }),
+    );
+}
+
+/// `mcpServers.inno-creed` 항목만 제거한다. 다른 서버 항목·나머지 키는 그대로 둔다.
+pub fn remove_inno_creed_entry(root: &mut Value) {
+    if let Some(servers) = root.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
+        servers.remove("inno-creed");
+    }
+}
+
+/// 쓰기 전 백업한다. 이미 `.bak`이 있으면 타임스탬프를 붙여 이전 백업을 보존한다.
+/// 원본 파일이 없으면(신규 등록) 백업할 것이 없으므로 `Ok(None)`.
+pub fn backup(path: &Path) -> io::Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut bak_name = path.as_os_str().to_os_string();
+    bak_name.push(".bak");
+    let mut bak = PathBuf::from(bak_name);
+    if bak.exists() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut named = path.as_os_str().to_os_string();
+        named.push(format!(".bak.{ts}"));
+        bak = PathBuf::from(named);
+    }
+    std::fs::copy(path, &bak)?;
+    Ok(Some(bak))
+}
+
+/// 임시 파일에 쓰고 rename — 쓰다 중단돼도 원본이 반쪽짜리로 깨지지 않는다.
+/// BOM 없는 UTF-8로 기록한다(BOM이 붙으면 일부 JSON 파서가 파일 전체를 거부한다).
+pub fn write_atomic(path: &Path, value: &Value) -> io::Result<()> {
+    let pretty = serde_json::to_string_pretty(value).expect("Value는 항상 직렬화 가능");
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let leaf = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("claude_desktop_config.json");
+    let tmp = dir.join(format!(".{leaf}.tmp"));
+    std::fs::write(&tmp, pretty.as_bytes())?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// 주어진 이름 중 하나라도 부분 일치(대소문자 무시)하는 프로세스가 실행 중이면 참.
+/// Claude Desktop 실행 여부 확인용 — Windows는 `Claude.exe`, macOS/Linux는 `Claude`.
+pub fn is_process_running(names: &[&str]) -> bool {
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_all();
+    let needles: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    sys.processes().values().any(|p| {
+        let pname = p.name().to_string_lossy().to_lowercase();
+        needles.iter().any(|n| pname.contains(n.as_str()))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // INSTALLER_TODO.md에 남은 실제 관측값(등록 전 claude_desktop_config.json) — 이 구조가
+    // 머지 후에도 바이트 단위로 무손상이어야 한다.
+    fn epitaxy_fixture() -> Value {
+        json!({
+            "coworkUserFilesPath": "C:\\Users\\zilha\\Claude",
+            "preferences": {
+                "coworkBrowserToolsEnabled": true,
+                "remoteToolsDeviceName": "jaehak",
+                "epitaxyPrefs": {
+                    "desktop-frame.paneStore.v1": {
+                        "state": { "extraPanesByMode": {}, "rowSplit": 0.5 },
+                        "version": 4
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn merge_preserves_unrelated_deep_nesting() {
+        let mut v = epitaxy_fixture();
+        merge_inno_creed_entry(&mut v, Path::new("/opt/inno-creed"));
+        assert_eq!(v["mcpServers"]["inno-creed"]["command"], "/opt/inno-creed");
+        assert_eq!(v["preferences"]["epitaxyPrefs"], epitaxy_fixture()["preferences"]["epitaxyPrefs"]);
+        assert_eq!(v["coworkUserFilesPath"], "C:\\Users\\zilha\\Claude");
+    }
+
+    #[test]
+    fn merge_creates_mcp_servers_when_absent() {
+        let mut v = json!({});
+        merge_inno_creed_entry(&mut v, Path::new("/opt/inno-creed"));
+        assert_eq!(v["mcpServers"]["inno-creed"]["command"], "/opt/inno-creed");
+    }
+
+    #[test]
+    fn merge_preserves_other_server_entries() {
+        let mut v = json!({ "mcpServers": { "other-tool": { "command": "/bin/other" } } });
+        merge_inno_creed_entry(&mut v, Path::new("/opt/inno-creed"));
+        assert_eq!(v["mcpServers"]["other-tool"]["command"], "/bin/other");
+        assert_eq!(v["mcpServers"]["inno-creed"]["command"], "/opt/inno-creed");
+    }
+
+    #[test]
+    fn unregister_removes_only_inno_creed() {
+        let mut v = json!({
+            "mcpServers": {
+                "other-tool": { "command": "/bin/other" },
+                "inno-creed": { "command": "/opt/inno-creed" }
+            },
+            "preferences": { "x": 1 }
+        });
+        remove_inno_creed_entry(&mut v);
+        assert!(v["mcpServers"].get("inno-creed").is_none());
+        assert_eq!(v["mcpServers"]["other-tool"]["command"], "/bin/other");
+        assert_eq!(v["preferences"]["x"], 1);
+    }
+
+    #[test]
+    fn unregister_on_missing_mcp_servers_is_noop() {
+        let mut v = json!({ "preferences": { "x": 1 } });
+        remove_inno_creed_entry(&mut v);
+        assert_eq!(v["preferences"]["x"], 1);
+    }
+
+    #[test]
+    fn backup_returns_none_when_file_absent() {
+        let dir = std::env::temp_dir().join(format!("config-kit-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude_desktop_config.json");
+        assert!(backup(&path).unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_atomic_then_read_json_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("config-kit-test2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("claude_desktop_config.json");
+        let mut v = epitaxy_fixture();
+        merge_inno_creed_entry(&mut v, Path::new("/opt/inno-creed"));
+        write_atomic(&path, &v).unwrap();
+        let back = read_json(&path).unwrap();
+        assert_eq!(back, v);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

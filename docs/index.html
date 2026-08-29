@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>inno-creed — 아마란스 MCP 서버 설치 가이드</title>
+<meta name="description" content="이노그리드 그룹웨어(아마란스)를 Claude로 다루는 MCP 서버, inno-creed. Claude 웹버전/Cowork/Code/CLI 환경별 차이와 설치 방법.">
+<style>
+  :root{
+    --bg:#faf9f7; --bg-alt:#ffffff; --ink:#1f1b16; --ink-soft:#5b5347;
+    --line:#e7e1d6; --accent:#b5540f; --accent-ink:#ffffff;
+    --ok-bg:#eaf5ea; --ok-ink:#1f6b2b; --ok-line:#bfe0c3;
+    --warn-bg:#fff6e0; --warn-ink:#8a5a00; --warn-line:#f0d98b;
+    --no-bg:#fdeceb; --no-ink:#a33327; --no-line:#f3c7c1;
+    --code-bg:#2b2620; --code-ink:#f2ead9;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#17140f; --bg-alt:#1f1b15; --ink:#f1ece1; --ink-soft:#c9bfa9;
+      --line:#3a3327; --accent:#e08a3e; --accent-ink:#1a1208;
+      --ok-bg:#173821; --ok-ink:#8fdc9c; --ok-line:#2a5c37;
+      --warn-bg:#3a2e0c; --warn-ink:#f0c86a; --warn-line:#5c4a17;
+      --no-bg:#3a1a16; --no-ink:#f0968a; --no-line:#5c2a23;
+      --code-bg:#0f0d09; --code-ink:#f2ead9;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic",sans-serif;
+    line-height:1.6;
+  }
+  .wrap{max-width:920px; margin:0 auto; padding:0 20px;}
+  header.hero{padding:56px 0 40px; text-align:center; border-bottom:1px solid var(--line);}
+  header.hero img{width:640px; max-width:100%; height:auto; border-radius:24px; box-shadow:0 10px 30px rgba(0,0,0,.2);}
+  header.hero h1{font-size:2rem; margin:20px 0 8px;}
+  header.hero p{color:var(--ink-soft); font-size:1.05rem; max-width:600px; margin:0 auto;}
+  .cta-row{display:flex; gap:10px; justify-content:center; margin-top:24px; flex-wrap:wrap;}
+  .btn{
+    display:inline-block; padding:10px 20px; border-radius:8px; text-decoration:none;
+    font-weight:600; font-size:.95rem; border:1px solid var(--line);
+  }
+  .btn.primary{background:var(--accent); color:var(--accent-ink); border-color:var(--accent);}
+  .btn.ghost{color:var(--ink); background:var(--bg-alt);}
+  .find-btn{
+    background:var(--accent); color:var(--accent-ink); border-color:var(--accent);
+    cursor:pointer; font-size:1rem; margin-bottom:30px;
+    box-shadow:0 6px 18px rgba(181,84,15,.28);
+  }
+  .find-btn:hover{filter:brightness(1.06);}
+
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(20,15,8,.6); z-index:1000;
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .modal-overlay[hidden]{display:none;}
+  .modal{
+    background:var(--bg-alt); border-radius:16px; max-width:560px; width:100%;
+    max-height:88vh; overflow-y:auto; padding:30px; position:relative;
+    box-shadow:0 24px 60px rgba(0,0,0,.4); border:1px solid var(--line);
+  }
+  .modal-close{
+    position:absolute; top:12px; right:14px; background:none; border:none;
+    font-size:1.4rem; cursor:pointer; color:var(--ink-soft); line-height:1; padding:6px;
+  }
+  .wizard-progress{display:flex; gap:6px; margin-bottom:22px;}
+  .wizard-progress span{flex:1; height:4px; border-radius:2px; background:var(--line);}
+  .wizard-progress span.done{background:var(--accent);}
+  .wizard-step{display:none;}
+  .wizard-step.active{display:block;}
+  .wizard-step h3{margin:0 0 16px; font-size:1.15rem;}
+  .wizard-opts{display:flex; flex-direction:column; gap:10px; margin-top:6px;}
+  .wizard-opt{
+    text-align:left; padding:14px 16px; border-radius:10px; border:1px solid var(--line);
+    background:var(--bg); color:var(--ink); cursor:pointer; font-size:.95rem; font-weight:600;
+    width:100%;
+  }
+  .wizard-opt:hover{border-color:var(--accent); background:var(--warn-bg);}
+  .wizard-hint-img{max-width:100%; border-radius:8px; border:1px solid var(--line); margin:6px 0 16px; display:block;}
+  .wizard-result{text-align:center;}
+  .wizard-result h3{font-size:1.3rem; margin:10px 0 12px;}
+  .wizard-result p{margin:0 0 8px; font-size:.94rem;}
+  .wizard-actions{display:flex; gap:10px; justify-content:center; margin-top:22px; flex-wrap:wrap;}
+  .wizard-back{
+    background:none; border:none; color:var(--ink-soft); font-size:.85rem; cursor:pointer;
+    margin-top:16px; text-decoration:underline; padding:0;
+  }
+
+  section{padding:48px 0; border-bottom:1px solid var(--line);}
+  section h2{font-size:1.5rem; margin-bottom:6px;}
+  section > .lead{color:var(--ink-soft); margin-bottom:28px;}
+
+  .grid4{display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px;}
+  .card{
+    background:var(--bg-alt); border:1px solid var(--line); border-radius:14px;
+    padding:20px; display:flex; flex-direction:column; gap:10px;
+  }
+  .card .name{font-size:1.05rem; font-weight:700;}
+  .card .where{font-size:.85rem; color:var(--ink-soft);}
+  .badge{
+    align-self:flex-start; font-size:.78rem; font-weight:700; padding:3px 10px;
+    border-radius:999px; border:1px solid;
+  }
+  .badge.no{background:var(--no-bg); color:var(--no-ink); border-color:var(--no-line);}
+  .badge.warn{background:var(--warn-bg); color:var(--warn-ink); border-color:var(--warn-line);}
+  .badge.ok{background:var(--ok-bg); color:var(--ok-ink); border-color:var(--ok-line);}
+  .card p{margin:0; font-size:.92rem; color:var(--ink);}
+
+  .note{
+    margin-top:24px; padding:16px 18px; border-radius:10px; font-size:.92rem;
+    background:var(--warn-bg); border:1px solid var(--warn-line); color:var(--warn-ink);
+  }
+  .note b{color:inherit;}
+
+  .tabs{display:flex; gap:6px; flex-wrap:wrap; margin-bottom:18px;}
+  .tab-btn{
+    padding:9px 16px; border-radius:8px 8px 0 0; border:1px solid var(--line);
+    border-bottom:none; background:var(--bg); color:var(--ink-soft); font-weight:600;
+    cursor:pointer; font-size:.92rem;
+  }
+  .tab-btn.active{background:var(--bg-alt); color:var(--ink); border-color:var(--accent);}
+  .tab-panel{
+    display:none; background:var(--bg-alt); border:1px solid var(--line); border-radius:0 10px 10px 10px;
+    padding:24px;
+  }
+  .tab-panel.active{display:block;}
+  .tab-panel h3{margin-top:0; font-size:1.1rem;}
+  .tab-panel ol{padding-left:1.2em;}
+  .tab-panel li{margin-bottom:10px;}
+  code, pre{
+    font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+    font-size:.88rem;
+  }
+  code{background:var(--code-bg); color:var(--code-ink); padding:2px 6px; border-radius:5px;}
+  pre{
+    background:var(--code-bg); color:var(--code-ink); padding:14px 16px; border-radius:10px;
+    overflow-x:auto;
+  }
+  pre code{background:none; padding:0;}
+
+  .steps-common{
+    background:var(--bg); border:1px dashed var(--line); border-radius:10px;
+    padding:16px 18px; margin-bottom:20px; font-size:.92rem;
+  }
+  .steps-common summary{cursor:pointer; font-weight:700;}
+
+  table{width:100%; border-collapse:collapse; font-size:.9rem; margin-top:8px;}
+  th, td{text-align:left; padding:8px 10px; border-bottom:1px solid var(--line);}
+  th{color:var(--ink-soft); font-weight:600;}
+
+  footer{padding:36px 0 60px; text-align:center; color:var(--ink-soft); font-size:.88rem;}
+  footer a{color:var(--ink-soft);}
+  a{color:var(--accent);}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <img src="assets/inno-creed-v2.jpg" alt="inno-creed 로고">
+    <h1>inno-creed</h1>
+    <p>이노그리드 그룹웨어 <b>아마란스</b>(gw.innogrid.com)를 Claude와의 대화로 다루는 MCP 서버입니다.<br>
+    회의실 예약, 메일, 결재, 일정, 게시판, 근태를 브라우저 없이 처리합니다.</p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/zilhak/inno-creed/releases/latest">최신 릴리즈 다운로드</a>
+      <a class="btn ghost" href="https://github.com/zilhak/inno-creed">GitHub 저장소</a>
+      <a class="btn ghost" href="https://github.com/zilhak/inno-creed/blob/main/docs/INSTALL.md">전체 설치 문서</a>
+    </div>
+  </div>
+</header>
+
+<section id="envs">
+  <div class="wrap">
+    <h2>지금 어떤 Claude를 쓰고 계신가요?</h2>
+    <p class="lead">"Claude"라는 이름 하나로 불려도 실제로는 서로 다른 프로그램입니다. inno-creed는 <b>여러분의 컴퓨터에서 직접 실행되는 프로그램</b>이라, Claude가 그 컴퓨터와 어떻게 연결되는지에 따라 쓸 수 있는지 여부가 갈립니다.</p>
+
+    <button type="button" class="btn find-btn" id="openWizard">🔍 내가 어떤 Claude 쓰는지 알아보기</button>
+
+    <div class="grid4">
+      <div class="card">
+        <span class="badge no">설치 불가</span>
+        <div class="name">웹버전</div>
+        <div class="where">claude.ai · Desktop 앱의 <b>Chat</b> 탭</div>
+        <p>평소 채팅하는 그 화면입니다. 서버(클라우드)에서 실행되기 때문에 여러분 컴퓨터에 있는 inno-creed 프로그램을 알거나 실행할 방법이 없습니다.</p>
+      </div>
+      <div class="card">
+        <span class="badge warn">조건부 가능</span>
+        <div class="name">Cowork</div>
+        <div class="where">Desktop 앱의 <b>Cowork</b> 탭</div>
+        <p>"이 일을 해줘"라고 맡기면 알아서 처리하는 에이전트 모드입니다. 단, <b>데스크톱 앱을 컴퓨터에 설치해서 그 자리에서 켜 놓은 경우에만</b> 됩니다. 같은 Cowork라도 웹브라우저·휴대폰 앱으로 들어간 세션은 안 됩니다.</p>
+      </div>
+      <div class="card">
+        <span class="badge ok">가능</span>
+        <div class="name">Code</div>
+        <div class="where">Desktop 앱의 <b>Code</b> 탭</div>
+        <p>Claude Code를 데스크톱 앱 화면 안에 넣어놓은 것입니다. 개발자용으로 보이지만, 설치만 한 번 해두면 대화창은 CLI와 똑같이 쓸 수 있습니다.</p>
+      </div>
+      <div class="card">
+        <span class="badge ok">가능</span>
+        <div class="name">CLI</div>
+        <div class="where">터미널의 <code>claude</code> 명령</div>
+        <p>터미널(명령창)에서 실행하는 버전입니다. Code 탭과 <b>완전히 같은 프로그램</b>이라 설정을 공유합니다.</p>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>Code와 CLI는 사실 같은 엔진입니다.</b> 화면(데스크톱 창 vs 터미널)만 다를 뿐 Claude Code라는 같은 프로그램이라, 아래 방법대로 터미널에서 <u>딱 한 번</u> 등록하면 Desktop 앱의 Code 탭에서도 그대로 보입니다. 따로 두 번 설치할 필요가 없습니다.
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>환경별 설치 방법</h2>
+    <p class="lead">아래에서 지금 쓰는 환경을 골라 따라 하세요. (전체 문제해결·상세 옵션은 <a href="https://github.com/zilhak/inno-creed/blob/main/docs/INSTALL.md">설치 가이드 전문</a> 참고)</p>
+
+    <details class="steps-common" open>
+      <summary>공통 준비물 (Cowork·Code·CLI 모두 먼저 진행)</summary>
+      <ol style="margin:12px 0 0; padding-left:1.2em;">
+        <li><a href="https://github.com/zilhak/inno-creed/releases/latest">릴리즈 페이지</a>에서 내 OS에 맞는 파일을 내려받습니다 (macOS/Linux/Windows).</li>
+        <li>macOS·Linux는 실행 권한을 줍니다: <code>chmod +x inno-creed-*</code></li>
+        <li>이노그리드 사내 계정으로 <code>gw.innogrid.com</code>에 브라우저 로그인이 돼 있어야 합니다. (Windows는 Chrome/Edge 확장 프로그램 설치를 권장 — <a href="https://github.com/zilhak/inno-creed/blob/main/docs/INSTALL.md#4-크레덴셜-연결--chromeedge-확장-프로그램-windows-권장">가이드 4번</a>)</li>
+      </ol>
+    </details>
+
+    <div class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="cli">CLI (터미널)</button>
+      <button class="tab-btn" data-tab="code">Code (Desktop 앱)</button>
+      <button class="tab-btn" data-tab="cowork">Cowork (Desktop 앱)</button>
+      <button class="tab-btn" data-tab="web">웹버전</button>
+    </div>
+
+    <div class="tab-panel active" id="panel-cli">
+      <h3>CLI — 터미널에서 등록</h3>
+      <p>가장 간단한 방법입니다. 이 한 줄이 Code 탭에도 그대로 적용됩니다.</p>
+      <pre><code>claude mcp add inno-creed --scope user -- /절대경로/inno-creed
+# Windows는 경로 끝이 ...\inno-creed.exe</code></pre>
+      <p><b>⚠️ <code>--scope user</code>를 빼먹지 마세요.</b> 빠뜨리면 지금 등록한 폴더에서만 보입니다. <code>claude mcp list</code>로 확인할 수 있습니다.</p>
+      <p>등록 후 터미널을 새로 열면(또는 <code>claude</code>를 재시작하면) 도구가 보입니다.</p>
+    </div>
+
+    <div class="tab-panel" id="panel-code">
+      <h3>Code (Desktop 앱) — CLI와 같은 방법</h3>
+      <p>Desktop 앱을 설치했다면 안에 터미널이 없어도, 컴퓨터의 아무 터미널(macOS는 터미널 앱, Windows는 PowerShell)을 열어 CLI 탭과 동일한 명령을 실행하면 됩니다:</p>
+      <pre><code>claude mcp add inno-creed --scope user -- /절대경로/inno-creed</code></pre>
+      <p>그다음 Desktop 앱을 <b>완전히 종료했다가 다시 열면</b> Code 탭에서 inno-creed 도구가 보입니다.</p>
+    </div>
+
+    <div class="tab-panel" id="panel-cowork">
+      <h3>Cowork (Desktop 앱) — 반드시 데스크톱 앱에서 실행 중이어야 함</h3>
+      <p>Cowork는 Claude Desktop 앱의 설정 파일을 그대로 읽습니다. Desktop 앱을 설치한 컴퓨터에서, 앱 안의 <b>커넥터(Connectors) 설정</b>에 직접 추가하거나 설정 파일을 편집합니다.</p>
+      <table>
+        <tr><th>환경</th><th><code>claude_desktop_config.json</code> 위치</th></tr>
+        <tr><td>macOS</td><td><code>~/Library/Application Support/Claude/</code></td></tr>
+        <tr><td>Windows (일반 설치)</td><td><code>%APPDATA%\Claude\</code></td></tr>
+        <tr><td>Windows (Microsoft Store)</td><td><code>%LOCALAPPDATA%\Packages\Claude_&lt;패키지ID&gt;\LocalCache\Roaming\Claude\</code></td></tr>
+      </table>
+      <pre><code>{
+  "mcpServers": {
+    "inno-creed": {
+      "command": "/절대경로/inno-creed"
+    }
+  }
+}</code></pre>
+      <p>저장 후 Desktop 앱을 <b>완전히 종료(트레이 포함)했다가 다시 실행</b>하면 Cowork·Code·Chat 모든 탭에서 같은 설정을 공유합니다.</p>
+      <div class="note" style="margin-top:16px;">
+        <b>웹브라우저나 휴대폰 앱으로 켠 Cowork 세션에서는 이 설정이 보이지 않습니다.</b> 로컬 MCP 서버는 Anthropic 정책상 데스크톱 앱으로 실행 중인 세션에서만 연결되기 때문입니다. 꼭 컴퓨터에 설치된 Desktop 앱을 켜서 쓰세요.
+      </div>
+    </div>
+
+    <div class="tab-panel" id="panel-web">
+      <h3>웹버전 — 설치할 수 없습니다</h3>
+      <p>claude.ai나 Desktop 앱의 Chat 탭은 클라우드에서 돌아가는 대화 화면이라, 여러분 컴퓨터에 설치한 프로그램과 연결할 방법 자체가 없습니다. 아마란스 업무를 대화로 처리하려면 위의 <b>Cowork · Code · CLI</b> 중 하나를 이용해 주세요.</p>
+      <p>가장 진입장벽이 낮은 건 <b>Cowork</b>입니다 — 터미널을 열 필요 없이 Desktop 앱 화면에서 설정을 마칠 수 있습니다.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>더 자세한 문제 해결(크레덴셜 인식 안 될 때 등)은 <a href="https://github.com/zilhak/inno-creed/blob/main/docs/INSTALL.md">설치 가이드 전문</a>, 전체 기능 목록은 <a href="https://github.com/zilhak/inno-creed#readme">README</a>를 참고하세요.</p>
+    <p>© inno-creed — <a href="https://github.com/zilhak/inno-creed">github.com/zilhak/inno-creed</a></p>
+  </div>
+</footer>
+
+<div class="modal-overlay" id="wizardOverlay" hidden>
+  <div class="modal">
+    <button class="modal-close" id="wizardClose" aria-label="닫기">✕</button>
+    <div class="wizard-progress" id="wizardProgress">
+      <span data-p="1"></span><span data-p="2"></span><span data-p="3"></span>
+    </div>
+
+    <div class="wizard-step active" data-step="1">
+      <h3>1단계. Claude를 사용하는 방법이 어떻게 되나요?</h3>
+      <div class="wizard-opts">
+        <button type="button" class="wizard-opt" data-next="result" data-result="web">🌐 웹페이지로 들어간다</button>
+        <button type="button" class="wizard-opt" data-next="2">🖥️ Claude Desktop 프로그램을 사용한다</button>
+        <button type="button" class="wizard-opt" data-next="result" data-result="cli">⌨️ 터미널(cmd, PowerShell, git bash 등)을 사용한다</button>
+      </div>
+    </div>
+
+    <div class="wizard-step" data-step="2">
+      <h3>2단계. 좌측 상단에 어떤 버튼을 눌러 사용하시나요?</h3>
+      <img class="wizard-hint-img" src="assets/step-code-toggle.png" alt="채팅 및 Cowork / Code 토글 버튼 스크린샷">
+      <div class="wizard-opts">
+        <button type="button" class="wizard-opt" data-next="3">채팅 및 Cowork</button>
+        <button type="button" class="wizard-opt" data-next="result" data-result="cli">Code</button>
+      </div>
+      <button type="button" class="wizard-back" data-back="1">← 이전으로</button>
+    </div>
+
+    <div class="wizard-step" data-step="3">
+      <h3>3단계. 채팅 모드를 무엇을 사용하나요?</h3>
+      <img class="wizard-hint-img" src="assets/step-cowork-toggle.png" alt="채팅 / Cowork 토글 버튼 스크린샷">
+      <div class="wizard-opts">
+        <button type="button" class="wizard-opt" data-next="result" data-result="web">채팅</button>
+        <button type="button" class="wizard-opt" data-next="result" data-result="cowork">Cowork</button>
+      </div>
+      <button type="button" class="wizard-back" data-back="2">← 이전으로</button>
+    </div>
+
+    <div class="wizard-step" data-step="result">
+      <div class="wizard-result" id="wizardResult"></div>
+      <div class="wizard-actions">
+        <button type="button" class="btn primary" id="wizardGoInstall">설치 방법 보러 가기</button>
+        <button type="button" class="btn ghost" id="wizardRestart">다시 진단하기</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  function activateTab(name){
+    document.querySelectorAll('.tab-btn').forEach(function(b){ b.classList.toggle('active', b.getAttribute('data-tab') === name); });
+    document.querySelectorAll('.tab-panel').forEach(function(p){ p.classList.toggle('active', p.id === 'panel-' + name); });
+  }
+  document.querySelectorAll('.tab-btn').forEach(function(btn){
+    btn.addEventListener('click', function(){ activateTab(btn.getAttribute('data-tab')); });
+  });
+
+  var RESULTS = {
+    web: {
+      badge: 'no', badgeText: '설치 불가',
+      title: '웹버전을 쓰고 계시네요',
+      body: '이 환경에서는 로컬 프로그램(inno-creed)을 실행할 수 없습니다. claude.ai나 Desktop 앱의 Chat 화면은 클라우드에서 돌아가기 때문에 여러분 컴퓨터에 설치한 프로그램과 연결할 방법이 없어요. 아마란스 업무를 대화로 처리하려면 <b>Cowork</b>나 <b>CLI</b>로 바꿔서 써야 합니다.',
+      tab: 'web'
+    },
+    cowork: {
+      badge: 'warn', badgeText: '조건부 가능',
+      title: 'Cowork를 쓰고 계시네요',
+      body: 'inno-creed를 쓸 수 있습니다. 단, <b>지금처럼 Desktop 앱을 컴퓨터에 직접 설치해서 켜 놓은 상태</b>여야 합니다(웹·모바일 Cowork는 안 됩니다). 아래에서 Cowork 설치 방법을 확인하세요.',
+      tab: 'cowork'
+    },
+    cli: {
+      badge: 'ok', badgeText: '가능',
+      title: 'CLI · Code를 쓰고 계시네요',
+      body: 'inno-creed를 바로 쓸 수 있습니다. Code 탭과 터미널의 CLI는 완전히 같은 프로그램이라 설정을 공유해요 — 터미널에서 한 번만 등록하면 Desktop 앱의 Code 탭에서도 그대로 보입니다.',
+      tab: 'cli'
+    }
+  };
+  var currentResultTab = null;
+  var overlay = document.getElementById('wizardOverlay');
+  var resultBox = document.getElementById('wizardResult');
+
+  function stepNum(step){ return step === 'result' ? 4 : Number(step); }
+  function goToStep(step){
+    document.querySelectorAll('.wizard-step').forEach(function(s){ s.classList.toggle('active', s.getAttribute('data-step') === String(step)); });
+    var n = stepNum(step);
+    document.querySelectorAll('#wizardProgress span').forEach(function(dot, i){ dot.classList.toggle('done', i < n - 1); });
+  }
+
+  function showResult(key){
+    var r = RESULTS[key];
+    currentResultTab = r.tab;
+    resultBox.innerHTML =
+      '<span class="badge ' + r.badge + '">' + r.badgeText + '</span>' +
+      '<h3>' + r.title + '</h3>' +
+      '<p>' + r.body + '</p>';
+    goToStep('result');
+  }
+
+  document.getElementById('openWizard').addEventListener('click', function(){
+    goToStep('1');
+    overlay.hidden = false;
+  });
+  document.getElementById('wizardClose').addEventListener('click', function(){ overlay.hidden = true; });
+  overlay.addEventListener('click', function(e){ if (e.target === overlay) overlay.hidden = true; });
+  document.addEventListener('keydown', function(e){ if (e.key === 'Escape' && !overlay.hidden) overlay.hidden = true; });
+
+  document.querySelectorAll('.wizard-opt').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var next = btn.getAttribute('data-next');
+      if (next === 'result'){ showResult(btn.getAttribute('data-result')); }
+      else { goToStep(next); }
+    });
+  });
+  document.querySelectorAll('.wizard-back').forEach(function(btn){
+    btn.addEventListener('click', function(){ goToStep(btn.getAttribute('data-back')); });
+  });
+
+  document.getElementById('wizardRestart').addEventListener('click', function(){ goToStep('1'); });
+  document.getElementById('wizardGoInstall').addEventListener('click', function(){
+    overlay.hidden = true;
+    if (currentResultTab){ activateTab(currentResultTab); }
+    document.getElementById('install').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+</script>
+
+</body>
+</html>

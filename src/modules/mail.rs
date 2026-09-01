@@ -112,6 +112,90 @@ pub async fn compose_init(c: &GwClient) -> Result<Value> {
     .await
 }
 
+/// 문서 래퍼 태그(`<html>`/`<head>`/`<body>` 여닫이) **만** 걷어낸다. 나머지 태그·텍스트·속성은
+/// 손대지 않는다. 다른 HTML의 **안쪽에 끼워 넣을** 조각을 만들 때 쓴다.
+fn strip_document_wrapper(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut tag = String::new();
+    let mut in_tag = false;
+    for ch in html.chars() {
+        match ch {
+            '<' => {
+                // 닫히지 않은 채 다시 '<'가 나오면 앞의 것은 태그가 아니었다 — 원문대로 흘린다.
+                if in_tag {
+                    out.push_str(&tag);
+                }
+                in_tag = true;
+                tag.clear();
+                tag.push(ch);
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                tag.push(ch);
+                let name = tag
+                    .trim_start_matches('<')
+                    .trim_start_matches('/')
+                    .trim_end_matches('>')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !matches!(name.as_str(), "html" | "head" | "body") {
+                    out.push_str(&tag);
+                }
+            }
+            _ if in_tag => tag.push(ch),
+            _ => out.push(ch),
+        }
+    }
+    if in_tag {
+        out.push_str(&tag);
+    }
+    out
+}
+
+/// A01(`compose_init`) 응답에서 **아마란스에 등록된 서명 HTML**을 꺼낸다. 웹 편집기가 작성 화면을
+/// 열 때 본문에 끼워 넣는 바로 그 값이라, 이어 붙이면 웹에서 보낸 것과 같은 형상이 된다.
+///
+/// 값은 `resultData.signature`에 **삽입용 래퍼(`<div class="dze_signature" …>`)까지 완성된 상태**로
+/// 온다 — 현재 선택된 서명 하나다(`configSignature.signatureIdx`가 가리키는 것). 등록 목록 전체는
+/// `configSignature.signatureList[]`(최대 3개)에 따로 있으나, 웹이 기본으로 넣는 것은 이 한 값이므로
+/// 그것만 쓴다. 서명을 등록하지 않은 계정은 이 필드가 빈 문자열이다.
+///
+/// ⛔ **`<html>`·`<head>`·`<body>`를 걷어내야 한다.** 서버가 주는 값은 래퍼 div **안에** 완전한 html
+/// 문서가 중첩된 모양(`<div …><html><head></head><body><table>…</body></html></div>`)이다. 그대로
+/// 이어 붙이면 메일 하나에 `<html>`이 둘이 되어 클라이언트에 따라 렌더가 깨진다. 실제 웹 발송분에는
+/// 그 세 겹이 없다 — 편집기가 벗겨낸다.
+/// (실측 대조 2026-09-01: 걷어낸 값과 웹 발송분(muid 14086132)의 서명 블록이 공백 정규화 후
+/// 앞 4,103자 완전 일치. 차이는 편집기가 덧붙인 뒤쪽 빈 줄 `<p><br></p>`뿐이었다.)
+fn signature_html(init: &Value) -> String {
+    let raw = init.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+    strip_document_wrapper(raw).trim().to_string()
+}
+
+/// 본문 끝에 서명을 이어 붙인다. `on`이 false거나 등록된 서명이 없으면 본문 그대로.
+///
+/// 서명 테이블 자체가 `margin:60px 0px 0px`를 갖고 있어 본문과의 간격은 서명이 스스로 만든다 —
+/// 여기서 빈 줄을 더 끼우지 않는다.
+///
+/// 이미 서명이 들어 있는 본문에는 붙이지 않는다. 기본값이 `on=true`라 호출자가 서명이 붙는 줄
+/// 모르고 본문에 직접 서명을 써 넣을 수 있는데, 그때 두 개가 되면 사람 눈에만 보이고 도구는
+/// 성공을 보고한다. 판정 기준은 더존 편집기가 서명에 늘 붙이는 마커 클래스다.
+///
+/// 반환의 두 번째 값 = **실제로 붙였는지**. 요청값(`on`)을 그대로 돌려주지 않는 이유는, 서명을
+/// 등록하지 않은 계정에서 이 함수가 조용히 아무것도 안 하기 때문이다 — 호출자가 `on:true`만 보고
+/// "서명이 들어갔다"고 보고하면 거짓이 된다. 도구 응답에 이 값을 실어 사람이 구분할 수 있게 한다.
+fn with_signature(html: &str, init: &Value, on: bool) -> (String, bool) {
+    if !on || html.contains("dze_signature") {
+        return (html.to_string(), false);
+    }
+    let sig = signature_html(init);
+    if sig.is_empty() {
+        return (html.to_string(), false);
+    }
+    (format!("{html}{sig}"), true)
+}
+
 /// 발송(`mail014A04`)과 임시저장(`mail014A14`)이 공유하는 작성 폼.
 ///
 /// 담기는 값은 **`mail014A01` 응답 스냅샷 + 호출 인자**뿐이다. 크레덴셜 파생값은 담지 않는다
@@ -295,6 +379,7 @@ async fn attachment_fields(c: &GwClient, attachments: &[String]) -> Result<(Stri
 /// ⚠️ 발송은 헤더 서명 + **body 내 authToken**(형식 `loginId|groupSeq|empSeq|secret`)을 함께 요구.
 /// `to`/`cc`/`bcc`는 표시형("이름 <email>") 또는 이메일이고, **여러 명이면 콤마로 잇는다**
 /// (실측 `analyze/15`). 실측 FormData 전 필드를 그대로 재현.
+/// `signature`가 true면 A01이 준 등록 서명을 본문 끝에 붙인다(웹 발송과 같은 형상).
 pub async fn send_mail(
     c: &GwClient,
     to: &str,
@@ -303,11 +388,13 @@ pub async fn send_mail(
     subject: &str,
     html: &str,
     attachments: &[String],
+    signature: bool,
 ) -> Result<Value> {
     let init = compose_init(c).await?;
     // 첨부: 로컬 파일을 mail014A06(multipart `file[]`)로 업로드 → uidAuthList 조립.
     let (uid_auth_list, big_file_cnt) = attachment_fields(c, attachments).await?;
-    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt)
+    let (html, signature_attached) = with_signature(html, &init, signature);
+    let cf = ComposeForm::new(&init, to, subject, &html, uid_auth_list, big_file_cnt)
         .with_carbon_copy(cc, bcc);
 
     // 폼을 "만드는 방법"으로 넘긴다 — 401 재취득 재시도 때 클라이언트가 재조립해야 하기 때문
@@ -319,7 +406,12 @@ pub async fn send_mail(
     if !ok {
         bail!("메일 발송 실패: {v}");
     }
-    Ok(rd.clone())
+    // 서버 응답에 우리 관측값 하나를 얹는다(응답이 객체가 아닌 형태로 오면 그냥 흘린다).
+    let mut out = rd.clone();
+    if let Some(o) = out.as_object_mut() {
+        o.insert("signature_attached".into(), json!(signature_attached));
+    }
+    Ok(out)
 }
 
 /// 임시저장(A14)이 발송 폼 위에 덧붙이는 전용 필드. 값은 **신규 저장** 기준이다
@@ -352,6 +444,8 @@ const DRAFT_READBACK_PAGE: i64 = 20;
 /// 반환: `draft_muid`(= 응답 `resultData.autoMUID`, 후속 조회·삭제 키),
 /// `mail_key`(= A01의 `mailkey`, 재저장 때 `mailKey`로 되돌려줄 값),
 /// `verified_by_readback`(임시보관함 재조회로 그 muid를 실제로 찾았는지 — 프로젝트 규약 §7).
+/// `signature`가 true면 A01이 준 등록 서명을 본문 끝에 붙여 **저장**한다 — 초안 본문에 들어가므로
+/// `send_mail_from_draft`가 본문째로 승계한다(그쪽에서 다시 붙이지 않는다).
 pub async fn save_mail_draft(
     c: &GwClient,
     to: &str,
@@ -360,6 +454,7 @@ pub async fn save_mail_draft(
     subject: &str,
     html: &str,
     attachments: &[String],
+    signature: bool,
 ) -> Result<Value> {
     let init = compose_init(c).await?;
     let (uid_auth_list, big_file_cnt) = attachment_fields(c, attachments).await?;
@@ -369,7 +464,8 @@ pub async fn save_mail_draft(
     } else {
         subject
     };
-    let cf = ComposeForm::new(&init, to, subject, html, uid_auth_list, big_file_cnt)
+    let (html, signature_attached) = with_signature(html, &init, signature);
+    let cf = ComposeForm::new(&init, to, subject, &html, uid_auth_list, big_file_cnt)
         .with_carbon_copy(cc, bcc);
     let form = || {
         DRAFT_FIELDS
@@ -403,7 +499,8 @@ pub async fn save_mail_draft(
     Ok(json!({
         "draft_muid": draft_muid,
         "mail_key": json_str(init.get("mailkey")),
-        "verified_by_readback": verified
+        "verified_by_readback": verified,
+        "signature_attached": signature_attached
     }))
 }
 
@@ -484,6 +581,10 @@ async fn delete_draft_original(c: &GwClient, mail_key: &str, draft_muid: &str) -
 ///    `draft_deleted:false`와 안내를 함께 실어 중복 발송을 사람이 막을 수 있게 한다.
 ///
 /// `to_override`가 비어 있으면 초안에 저장된 수신자(`draft_recipient`)로 보낸다.
+///
+/// ⛔ **여기서 서명을 붙이지 않는다.** 이 도구는 초안 본문을 **그대로** 보내는 것이 계약이고,
+/// 서명은 초안을 만든 쪽(`save_mail_draft`, 또는 아마란스 웹 편집기)이 이미 본문에 넣어 두었다.
+/// 여기서 한 번 더 붙이면 사람이 확인한 형상과 실제 발송물이 어긋나고 서명이 두 개가 된다.
 pub async fn send_mail_from_draft(
     c: &GwClient,
     draft_muid: &str,
@@ -1385,6 +1486,48 @@ mod tests {
         assert!(!has_muid(&list, "99999999")); // 없는 muid는 미검증
         assert!(!has_muid(&json!({}), "1")); // Records가 아예 없으면 미검증
         assert!(!has_muid(&json!({ "Records": [] }), "1"));
+    }
+
+    /// 서버가 주는 서명은 래퍼 div **안에** 완전한 html 문서가 중첩된 모양이다. 그걸 그대로
+    /// 이어 붙이면 메일 하나에 `<html>`이 둘이 되므로 세 겹을 걷어내야 한다.
+    /// (실물 형태 — muid 14086132 발송분 대조로 확정)
+    #[test]
+    fn 서명은_문서_래퍼를_벗고_붙는다() {
+        let init = json!({
+            "signature": "<div class=\"dze_signature\" dze_signature_index=\"1\"><html><head></head><body><table><tr><td>이재학</td></tr></table></body></html></div>"
+        });
+        let (html, attached) = with_signature("<p>본문</p>", &init, true);
+        assert!(attached);
+        assert!(html.starts_with("<p>본문</p><div class=\"dze_signature\""));
+        assert!(!html.contains("<html>") && !html.contains("<body>") && !html.contains("</head>"));
+        assert!(html.contains("<table><tr><td>이재학</td></tr></table>")); // 안쪽은 그대로
+    }
+
+    /// 붙이지 않는 세 경우. 특히 **서명 미등록 계정**에서 조용히 아무 일도 안 하므로,
+    /// 요청값이 아니라 반환 플래그를 도구 응답에 실어야 거짓 보고가 안 된다.
+    #[test]
+    fn 서명은_끄면_미등록이면_이미_있으면_붙지_않는다() {
+        let init = json!({ "signature": "<div class=\"dze_signature\"><table></table></div>" });
+        assert_eq!(with_signature("<p>본문</p>", &init, false), ("<p>본문</p>".into(), false));
+        // 미등록 계정: 필드가 빈 문자열이거나 아예 없다
+        assert_eq!(with_signature("<p>본문</p>", &json!({ "signature": "" }), true), ("<p>본문</p>".into(), false));
+        assert_eq!(with_signature("<p>본문</p>", &json!({}), true), ("<p>본문</p>".into(), false));
+        // 호출자가 본문에 이미 서명을 써 넣은 경우 — 두 개가 되면 도구는 성공을 보고한다
+        let already = "<p>본문</p><div class=\"dze_signature\">직접 넣음</div>";
+        assert_eq!(with_signature(already, &init, true), (already.to_string(), false));
+    }
+
+    /// 걷어내는 것은 문서 래퍼 **셋뿐**이다. 다른 태그를 건드리면 서명 레이아웃이 깨진다.
+    #[test]
+    fn 문서래퍼_제거는_다른_태그를_건드리지_않는다() {
+        assert_eq!(strip_document_wrapper("<HTML><BODY><p>가</p></BODY></HTML>"), "<p>가</p>"); // 대문자도
+        assert_eq!(strip_document_wrapper("<body style=\"x\">가</body>"), "가"); // 속성이 붙어도
+        assert_eq!(strip_document_wrapper("<table><tr><td>가</td></tr></table>"), "<table><tr><td>가</td></tr></table>");
+        assert_eq!(strip_document_wrapper("<br /><hr/>"), "<br /><hr/>");
+        assert_eq!(strip_document_wrapper("<!-- 주석 -->"), "<!-- 주석 -->");
+        // 태그가 아닌 '<'(닫히지 않은 것)은 원문대로 남긴다 — 본문을 조용히 먹지 않는다.
+        assert_eq!(strip_document_wrapper("a < b"), "a < b");
+        assert_eq!(strip_document_wrapper("2 <3 and <p>가</p>"), "2 <3 and <p>가</p>");
     }
 
     #[test]

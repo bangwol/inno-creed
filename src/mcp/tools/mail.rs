@@ -47,7 +47,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "메일을 **새로 조립해 발송한다**(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. **여러 명에게 보내려면 to에 콤마로 잇는다**(`\"홍길동 <hong@innogrid.com>,kim@innogrid.com\"` — 표시형과 순수 주소를 섞어도 된다). 참조는 cc, 숨은참조는 bcc에 같은 형식으로. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 list_mail_drafts로 사용자에게 확인을 요청한 뒤, 확인받고 나서는 **이 도구가 아니라 send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송한다**(확인받은 형상과 실제 발송물이 어긋날 여지가 없고, 원본 초안 정리도 그 도구가 한다). 이 도구는 **초안을 거치지 않는 직접 발송용**이다 — 사용자가 즉시 발송을 명시적으로 지시했거나, 본인 앞 메모·자동화처럼 사람 확인이 필요 없는 발송에 쓴다."
+        description = "메일을 **새로 조립해 발송한다**(2단계: 작성폼 초기화→발송). 받는사람 미지정 시 본인에게. **여러 명에게 보내려면 to에 콤마로 잇는다**(`\"홍길동 <hong@innogrid.com>,kim@innogrid.com\"` — 표시형과 순수 주소를 섞어도 된다). 참조는 cc, 숨은참조는 bcc에 같은 형식으로. attachments에 로컬 파일 경로를 주면 첨부 발송. ⚠️ 발송은 되돌릴 수 없다(수신자에게 나가면 회수 불가) — 곧바로 보내지 말고, 먼저 save_mail_draft로 보낼 형상을 임시보관함에 만들고 list_mail_drafts로 사용자에게 확인을 요청한 뒤, 확인받고 나서는 **이 도구가 아니라 send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송한다**(확인받은 형상과 실제 발송물이 어긋날 여지가 없고, 원본 초안 정리도 그 도구가 한다). 이 도구는 **초안을 거치지 않는 직접 발송용**이다 — 사용자가 즉시 발송을 명시적으로 지시했거나, 본인 앞 메모·자동화처럼 사람 확인이 필요 없는 발송에 쓴다. 아마란스에 등록해 둔 **서명이 기본으로 본문 끝에 붙는다**(웹에서 보낸 것과 같은 형상) — 붙지 않아야 하면 `signature:false`. 응답의 `signature_attached`가 실제로 붙었는지를 알려준다(서명 미등록 계정은 켜 두어도 false)."
     )]
     async fn send_mail(
         &self,
@@ -57,9 +57,18 @@ impl Amaranth {
         let to = recipient_or_self(&self.client, &a.to);
         let cc = a.cc.as_deref().unwrap_or("");
         let bcc = a.bcc.as_deref().unwrap_or("");
-        modules::mail::send_mail(&self.client, &to, cc, bcc, &a.subject, &a.html, &a.attachments)
-            .await
-            .map_err(map_domain_err_ctx("메일 발송 실패"))?;
+        let data = modules::mail::send_mail(
+            &self.client,
+            &to,
+            cc,
+            bcc,
+            &a.subject,
+            &a.html,
+            &a.attachments,
+            a.signature,
+        )
+        .await
+        .map_err(map_domain_err_ctx("메일 발송 실패"))?;
         let msg = serde_json::json!({
             "ok": true,
             "to": to,
@@ -67,13 +76,15 @@ impl Amaranth {
             "bcc": bcc,
             "subject": a.subject,
             "attachments": a.attachments.len(),
+            // 요청값(a.signature)이 아니라 **실제로 붙었는지**. 서명 미등록 계정에서는 켜 두어도 false다.
+            "signature_attached": data.get("signature_attached"),
             "note": "발송 성공(result:true). 도착 확인은 list_mail_inbox/보낸메일함 재조회 권장"
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))
     }
 
     #[tool(
-        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 list_mail_drafts로 사용자에게 확인받은 뒤, 확인되면 **send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송**하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. **여러 명이면 to에 콤마로 잇는다**; 참조는 cc, 숨은참조는 bcc에 같은 형식으로 — **여기 넣은 참조는 send_mail_from_draft가 그대로 승계해 발송한다.** attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
+        description = "메일을 임시보관함(DRAFTS)에 저장한다 — **발송하지 않는다**(수신자에게 아무것도 가지 않는다). 발송 전 사람 확인을 받는 표준 경로라 send_mail보다 이 도구를 먼저 쓴다 — 초안을 만들고 list_mail_drafts로 사용자에게 확인받은 뒤, 확인되면 **send_mail_from_draft(draft_muid)로 그 초안을 그대로 발송**하거나 사용자가 아마란스 웹에서 직접 보낸다. 다만 사용자가 즉시 발송을 명시적으로 지시했다면 초안을 거치지 말고 곧바로 send_mail을 쓴다. 받는사람 미지정 시 본인. **여러 명이면 to에 콤마로 잇는다**; 참조는 cc, 숨은참조는 bcc에 같은 형식으로 — **여기 넣은 참조는 send_mail_from_draft가 그대로 승계해 발송한다.** attachments에 로컬 파일 경로를 주면 첨부까지 붙여 저장. 반환 draft_muid = 저장된 임시보관 메일의 muid. 아마란스에 등록해 둔 **서명이 기본으로 본문 끝에 붙어 저장된다**(웹에서 보낸 것과 같은 형상. send_mail_from_draft가 본문째로 승계하므로 두 번 붙지 않는다) — 붙지 않아야 하면 `signature:false`. 응답의 `signature_attached`가 실제로 붙었는지를 알려준다(서명 미등록 계정은 켜 두어도 false). ⚠️ 전자결재 임시보관함과는 무관하다(그쪽은 list_approvals(box_name=\"draft\"))."
     )]
     async fn save_mail_draft(
         &self,
@@ -84,7 +95,14 @@ impl Amaranth {
         let cc = a.cc.as_deref().unwrap_or("");
         let bcc = a.bcc.as_deref().unwrap_or("");
         let data = modules::mail::save_mail_draft(
-            &self.client, &to, cc, bcc, &a.subject, &a.html, &a.attachments,
+            &self.client,
+            &to,
+            cc,
+            bcc,
+            &a.subject,
+            &a.html,
+            &a.attachments,
+            a.signature,
         )
         .await
         .map_err(map_domain_err_ctx("메일 임시저장 실패"))?;
@@ -101,6 +119,8 @@ impl Amaranth {
             // 임시보관함을 재조회해 그 muid를 실제로 찾았는지. false여도 저장 자체가 실패한 것은
             // 아니지만(조회가 막혔을 수 있다), 그 경우 사람이 임시보관함을 눈으로 확인해야 한다.
             "verified_by_readback": data.get("verified_by_readback"),
+            // 요청값(a.signature)이 아니라 **실제로 붙었는지**. 서명 미등록 계정에서는 켜 두어도 false다.
+            "signature_attached": data.get("signature_attached"),
             "note": "임시보관함에 저장만 됨(발송 아님). 목록 확인은 list_mail_drafts"
         });
         Ok(CallToolResult::success(vec![ContentBlock::text(msg.to_string())]))

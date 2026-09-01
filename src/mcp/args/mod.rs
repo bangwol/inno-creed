@@ -153,6 +153,10 @@ pub(super) fn thirty() -> i64 {
     30
 }
 
+pub(super) fn yes() -> bool {
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

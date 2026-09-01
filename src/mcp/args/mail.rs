@@ -28,6 +28,12 @@ pub struct SendMailArgs {
     /// 첨부할 로컬 파일 경로 목록(선택, 절대경로). 비우면 첨부 없음.
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// 서명 자동 첨부 여부(선택, **기본 true**). 아마란스에 등록해 둔 서명을 본문 끝에 붙여
+    /// **웹에서 보낼 때와 같은 형상**으로 만든다 — 사람이 보내는 메일이면 켜 두는 것이 맞다.
+    /// 서명이 등록돼 있지 않으면 아무것도 붙지 않는다(에러 아님).
+    /// `false`는 시스템 알림·자동화처럼 서명이 없어야 하는 발송에만 쓴다.
+    #[serde(default = "super::yes")]
+    pub signature: bool,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]
@@ -53,6 +59,13 @@ pub struct SaveMailDraftArgs {
     /// 첨부할 로컬 파일 경로 목록(선택, 절대경로). 비우면 첨부 없음.
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// 서명 자동 첨부 여부(선택, **기본 true**). 아마란스에 등록해 둔 서명을 본문 끝에 붙여
+    /// **웹에서 보낼 때와 같은 형상**으로 저장한다 — 초안은 사람이 확인하고 보내는 것이므로
+    /// 켜 두는 것이 맞다. 여기 붙은 서명은 send_mail_from_draft가 **본문째로 승계**한다
+    /// (그 도구는 서명을 다시 붙이지 않는다 — 두 번 붙는 일이 없다).
+    /// 서명이 등록돼 있지 않으면 아무것도 붙지 않는다(에러 아님).
+    #[serde(default = "super::yes")]
+    pub signature: bool,
 }
 
 #[derive(Deserialize, rmcp::schemars::JsonSchema)]

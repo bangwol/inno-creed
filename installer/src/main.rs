@@ -59,6 +59,14 @@ fn setup_korean_font(ctx: &egui::Context) {
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
                 .insert(0, "korean".to_owned());
+            // Monospace에도 넣는다 — doctor 전체 출력을 `ui.monospace`로 그리는데
+            // 여기에 없으면 그 안의 한글만 네모로 깨진다. 이쪽은 맨 뒤에 붙여
+            // ASCII는 고정폭 그대로 두고 한글만 넘어오게 한다.
+            fonts
+                .families
+                .entry(egui::FontFamily::Monospace)
+                .or_default()
+                .push("korean".to_owned());
         }
     }
     ctx.set_fonts(fonts);

@@ -5,6 +5,24 @@ use crate::{install, payload};
 use crate::registry;
 use eframe::egui;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// 확장 관리 화면 주소는 브라우저마다 다른데, 설치 프로그램은 사용자가 어느 쪽을
+/// 쓰는지 알 수 없다. 그래서 열어주는 대신 **어느 주소를 보여줄지**만 사용자가 고른다.
+#[derive(PartialEq, Clone, Copy)]
+enum ExtBrowser {
+    Chrome,
+    Edge,
+}
+
+impl ExtBrowser {
+    fn url(self) -> &'static str {
+        match self {
+            Self::Chrome => "chrome://extensions",
+            Self::Edge => "edge://extensions",
+        }
+    }
+}
 
 enum Screen {
     Welcome,
@@ -31,6 +49,8 @@ pub struct InstallerApp {
     doctor_output: Option<String>,
     doctor_ok: bool,
     doctor_expanded: bool,
+    ext_browser: ExtBrowser,
+    copied_at: Option<Instant>,
 }
 
 /// 후보 중 실제로 쓸 만한 것을 고른다. **존재만 하는 파일을 무조건 집지 않는다** —
@@ -72,6 +92,8 @@ impl Default for InstallerApp {
             doctor_output: None,
             doctor_ok: false,
             doctor_expanded: false,
+            ext_browser: ExtBrowser::Chrome,
+            copied_at: None,
         }
     }
 }
@@ -315,17 +337,50 @@ impl InstallerApp {
         }
     }
 
+    /// 복사 직후 잠깐 뜨는 알림. 사용자 입력 없이도 스스로 사라져야 하므로
+    /// 떠 있는 동안은 다시 그려달라고 요청한다.
+    fn copy_toast(&self, ctx: &egui::Context) {
+        const TOAST: Duration = Duration::from_millis(2200);
+        let Some(at) = self.copied_at else { return };
+        if at.elapsed() >= TOAST {
+            return;
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
+        egui::Area::new(egui::Id::new("copy_toast"))
+            .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style())
+                    .fill(egui::Color32::from_rgb(40, 120, 60))
+                    .show(ui, |ui| {
+                        ui.colored_label(
+                            egui::Color32::WHITE,
+                            "✅ 주소가 복사되었습니다. 주소창에 붙여넣으세요.",
+                        );
+                    });
+            });
+    }
+
     fn extension_guide_screen(&mut self, ui: &mut egui::Ui) {
         ui.heading("확장 프로그램 연결");
         ui.add_space(12.0);
         ui.label("아마란스 로그인 정보를 안전하게 가져오려면 Chrome/Edge 확장 프로그램을 마저 등록해야 합니다. 아직 안 하면 로그인 인증이 안 잡힙니다.");
         ui.add_space(8.0);
         ui.label("1. 아래 [확장 폴더 열기]로 열리는 폴더를 기억해두세요.");
-        ui.label("2. 아래 버튼으로 확장 관리 화면을 열고 개발자 모드를 켭니다.");
+        ui.label("2. 아래 주소를 복사해 브라우저 주소창에 붙여넣어 확장 관리 화면을 열고 개발자 모드를 켭니다.");
         ui.label("   (Chrome은 화면 우측 상단, Edge는 화면 좌측 하단에 토글이 있습니다)");
         ui.label("3. \"압축해제된 확장 프로그램을 로드합니다\"(Edge는 \"압축 풀린 파일 로드\")를 눌러 방금 그 폴더를 선택합니다.");
         ui.label("4. 목록에 \"inno-creed 크레덴셜 브릿지\" 카드가 뜨고 토글이 켜져 있으면 성공입니다.");
         ui.add_space(16.0);
+
+        // Ctrl+C · Cmd+C · Ctrl+Shift+C는 egui-winit에서 전부 `Event::Copy` 하나로 들어온다.
+        // 이벤트를 여기서 걷어내는 것은, 그대로 두면 아래 주소 라벨의 **부분 선택** 복사가
+        // 패스 끝에 우리 복사를 덮어써서 "무조건 주소 전체"가 깨지기 때문이다.
+        let copy_shortcut = ui.input_mut(|i| {
+            let hit = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+            i.events.retain(|e| !matches!(e, egui::Event::Copy));
+            hit
+        });
 
         ui.horizontal(|ui| {
             if let Some(ext_dir) = self.install_result.as_ref().and_then(|r| r.extension_dir.clone()) {
@@ -333,13 +388,26 @@ impl InstallerApp {
                     let _ = open::that(ext_dir);
                 }
             }
-            if ui.button("🌐 chrome://extensions 열기").clicked() {
-                let _ = open::that("chrome://extensions");
-            }
-            if ui.button("🌐 edge://extensions 열기").clicked() {
-                let _ = open::that("edge://extensions");
-            }
+            ui.selectable_value(&mut self.ext_browser, ExtBrowser::Chrome, "Chrome 주소");
+            ui.selectable_value(&mut self.ext_browser, ExtBrowser::Edge, "Edge 주소");
         });
+
+        ui.add_space(8.0);
+        let url = self.ext_browser.url();
+        let mut copy_clicked = false;
+        ui.horizontal(|ui| {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.add(egui::Label::new(egui::RichText::new(url).monospace().size(15.0)).selectable(true));
+            });
+            copy_clicked = ui.button("📋 복사").clicked();
+        });
+        ui.small("드래그해서 복사하거나, [복사] 버튼 또는 Ctrl+C / Cmd+C / Ctrl+Shift+C를 누르세요.");
+
+        if copy_clicked || copy_shortcut {
+            ui.ctx().copy_text(url.to_owned());
+            self.copied_at = Some(Instant::now());
+        }
+        self.copy_toast(ui.ctx());
 
         ui.add_space(16.0);
         ui.group(|ui| {

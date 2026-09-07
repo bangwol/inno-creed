@@ -269,6 +269,7 @@
 
 - 응답: `resultCode:0` + `resultData: {"code":"0","msg":"SUCCESS"}` — **봉투 안에 또 봉투**.
 - ⚠️ **응답에 uid별 결과가 없다.** 성패와 무관하게 같은 모양이 오므로 반영 여부는 **목록 재조회로만** 알 수 있다(§7.1 3분법을 그대로 적용).
+- 도구는 **받은메일함 최근 200건** 안에서 대상을 확인한 뒤 실행한다. 이미 미읽음이면 실행 없이 `already:true`. `seen`의 숫자·문자열·불리언을 흡수하고, 재조회에서 값을 해석할 수 없으면 실패로 단정하지 않고 `ok:false`, `verifiedByReadback:false`로 확인 불가를 보고한다.
 - `uids`가 복수형이고 `type`이 판별자다 = **범용 플래그 변경 API**. `"unseen"` 외의 `type`(`seen`·`flagged` 등)은 **미관측**이라 래퍼가 열지 않는다(관측되지 않은 상태에 콜을 쏘지 않는다, §7.2).
 - 왕복 실증: `unseen 2→3`(해제, 대상 `seen 1→0`) → `read_mail`로 원복 → `2` 복귀.
 - **미검증**: `uids` 다건(콤마 구분) · `mbox`가 실제로 쓰이는지(`mail003A01`은 `boxName`을 무시한다).
@@ -581,7 +582,9 @@ POST /mail/mail002A01   body(JSON): { uid: <muid> }
 - 도구는 본문을 **평문화**해서 반환(HTML은 `html_to_text`, plain 우선). ⚠️ **렌더링하지 않으므로 외부 이미지(추적 픽셀)를 자동 fetch하지 않음** — 외부 리소스가 있으면 `remoteResourceCount`로 개수만 경고. (보안: 열람 유출 방지)
 - 첨부는 메타데이터(name/ext/`fileSizeApprox`/fileSn/isImage)만 반환. `fileSn`은 **호출마다 바뀌는 세션 토큰** → read 직후 다운로드에 사용.
 - ⚠️ `fileList[].fileSize`는 원본 바이트가 아니라 **MIME 본문(base64+줄바꿈) 크기**라 실제보다 ~33% 큼 → 도구는 `fileSizeApprox`(≈ ×3/4)로 근사해 반환. **정확한 크기는 `download_mail_attachment`의 `bytes`**. (게시판 `ecm001A04`의 fileSize는 원본 그대로라 이 보정 불필요)
-- ⚠️ 조회수/읽음처리: UI는 별도 `mail002A15`(seen)를 호출한다. `mail002A01` 단독은 읽음 부작용이 없는 것으로 관측(미확정).
+- ⚠️ **읽음 처리된다 — `mail002A01` 단독으로 서버측 `seen` 플래그가 세워진다.** 실측 2026-08-31: 호출 전 INBOX `unseen=1` → 호출 후 `0`.
+  이전의 "부작용 없음(미확정)" 기록은 반증되어 정정한다. `mail002A15`의 `type:"seen"` 호출은 미관측이므로 기존 UI 호출 서술도 철회한다.
+  되돌림은 `mail002A15` `type:"unseen"` → 위 "읽음 플래그 (mail002A15 · mail000A03)" 절의 `mark_mail_unread`. **받은메일함 최근 200건 안의 메일만 가능**하므로 그 밖의 메일은 되돌림을 전제하고 열지 않는다.
 
 ### 메일 첨부 다운로드 (mail014A08 → ecm001A03) → `download_mail_attachment`
 

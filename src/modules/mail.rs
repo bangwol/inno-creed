@@ -97,17 +97,26 @@ fn has_muid(list: &Value, muid: &str) -> bool {
         .is_some_and(|rows| rows.iter().any(|m| json_str(m.get("muid")) == muid))
 }
 
-/// 목록 응답에서 그 `muid`의 `seen`(0=미읽음, 1=읽음). 창 안에 없으면 `None`.
-/// `has_muid`와 나란히 두지만 **묻는 것이 다르다** — 존재 여부가 아니라 상태값이다.
-///
-/// ⚠️ `seen` 필드가 없으면 **읽음(1)으로 본다 — fail-closed.** "모른다"를 미읽음으로 치면
-/// `mark_unread_and_verify`의 사전 확인이 "이미 미읽음"으로 빠져 실행 자체를 건너뛴다.
-fn seen_flag(list: &Value, muid: &str) -> Option<i64> {
+/// 해석 불가를 읽음으로 접으면 성공한 쓰기를 실패로 보고하므로 별도 상태로 둔다.
+#[derive(Debug, PartialEq, Eq)]
+enum SeenState {
+    Unseen,
+    Seen,
+    Unknown,
+}
+
+/// 대상의 읽음 상태. 목록에서 찾지 못하면 `None`, 대상의 `seen`만 해석 불가면 `Unknown`.
+/// API가 숫자·문자열·불리언을 혼용하므로 `json_str`로 흡수한다.
+fn seen_flag(list: &Value, muid: &str) -> Option<SeenState> {
     list.get("Records")?
         .as_array()?
         .iter()
         .find(|m| json_str(m.get("muid")) == muid)
-        .map(|m| m.get("seen").and_then(Value::as_i64).unwrap_or(1))
+        .map(|m| match json_str(m.get("seen")).as_str() {
+            "0" | "false" => SeenState::Unseen,
+            "1" | "true" => SeenState::Seen,
+            _ => SeenState::Unknown,
+        })
 }
 
 /// `mark_unread_and_verify`가 대상을 확인하는 목록 창(최근 N건).
@@ -138,7 +147,7 @@ pub async fn mailbox_counts(c: &GwClient) -> Result<Value> {
 /// |---|---|
 /// | 있고 `seen=0` | 반영됨 → `ok:true` |
 /// | 있고 `seen=1` | 반영 안 됨 → 실패(`Err`) |
-/// | 창 안에 없음 | **모르는 것** → `ok:false` + "실행은 됐으나 확인 못 함" |
+/// | 창 안에 없거나 `seen` 해석 불가 | **모르는 것** → `ok:false` + "실행은 됐으나 확인 못 함" |
 ///
 /// 이미 미읽음이면 **실행하지 않고** `already:true`로 끝낸다(`attendance::punch_and_verify`와 같은 규약).
 pub async fn mark_unread_and_verify(c: &GwClient, muid: &str) -> Result<Value> {
@@ -150,13 +159,14 @@ pub async fn mark_unread_and_verify(c: &GwClient, muid: &str) -> Result<Value> {
     // 사전 확인 — 창 안에 있는지, 이미 미읽음인지. 여기서 끝나면 콜을 쏘지 않는다.
     let before = list_mails(c, seq, 1, UNREAD_WINDOW).await?;
     match seen_flag(&before, muid) {
-        Some(0) => {
+        Some(SeenState::Unseen) => {
             return Ok(json!({
-                "ok": true, "already": true, "muid": muid,
+                "ok": true, "already": true, "muid": muid, "verifiedByReadback": true,
                 "note": "이미 읽지 않음 상태 — 서버에 아무것도 보내지 않았다"
             }));
         }
-        Some(_) => {}
+        // 대상이 있으면 상태 미상이어도 실행한다 — 이미 미읽음으로 오판해 건너뛰지 않는다.
+        Some(SeenState::Seen | SeenState::Unknown) => {}
         // 창 밖일 수도, 정말 없을 수도 있다. 어느 쪽인지 모르는 채로 쏘지 않는다.
         None => {
             return Err(InvalidInput(format!(
@@ -174,10 +184,14 @@ pub async fn mark_unread_and_verify(c: &GwClient, muid: &str) -> Result<Value> {
 
     let after = list_mails(c, seq, 1, UNREAD_WINDOW).await?;
     match seen_flag(&after, muid) {
-        Some(0) => Ok(json!({
+        Some(SeenState::Unseen) => Ok(json!({
             "ok": true, "already": false, "muid": muid, "verifiedByReadback": true
         })),
-        Some(_) => bail!("읽지 않음 처리가 반영되지 않았다(muid={muid}) — 재조회 결과가 여전히 읽음이다"),
+        Some(SeenState::Seen) => bail!("읽지 않음 처리가 반영되지 않았다(muid={muid}) — 재조회 결과가 여전히 읽음이다"),
+        Some(SeenState::Unknown) => Ok(json!({
+            "ok": false, "muid": muid, "verifiedByReadback": false,
+            "note": "실행은 됐으나 재조회의 seen 값을 해석할 수 없어 반영을 확인하지 못했다"
+        })),
         None => Ok(json!({
             "ok": false, "muid": muid, "verifiedByReadback": false,
             "note": "실행은 됐으나 재조회에서 대상을 찾지 못해 반영을 확인하지 못했다"
@@ -1337,21 +1351,37 @@ pub async fn delete_mails(c: &GwClient, uids: &str) -> Result<Value> {
 mod tests {
     use super::*;
 
-    /// `seen_flag`는 **없는 필드를 읽음(1)으로 접는다** — fail-closed.
-    /// 이걸 미읽음(0)으로 접으면 `mark_unread_and_verify`가 "이미 미읽음"으로 오판해
-    /// 되돌림을 조용히 건너뛴다(사용자는 계속 읽음 상태를 본다).
+    /// 타입이 달라도 같은 상태로 판정해야 사전 확인과 사후 검증이 어긋나지 않는다.
     #[test]
-    fn seen_flag는_모르는_것을_읽음으로_접는다() {
+    fn seen_flag는_숫자_문자열_불리언을_모두_흡수한다() {
+        for seen in [json!(0), json!("0"), json!(false), json!("false")] {
+            let list = json!({ "Records": [{ "muid": 1, "seen": seen }] });
+            assert_eq!(seen_flag(&list, "1"), Some(SeenState::Unseen), "seen={seen}");
+        }
+        for seen in [json!(1), json!("1"), json!(true), json!("true")] {
+            let list = json!({ "Records": [{ "muid": "1", "seen": seen }] });
+            assert_eq!(seen_flag(&list, "1"), Some(SeenState::Seen), "seen={seen}");
+        }
+    }
+
+    /// 필드 해석 불가와 대상 부재를 구분하고, 어느 쪽도 읽음·미읽음으로 단정하지 않는다.
+    #[test]
+    fn seen_flag는_모름을_읽음과_구분한다() {
         let list = json!({ "Records": [
-            { "muid": 1, "seen": 0 },
-            { "muid": 2, "seen": 1 },
-            { "muid": 3 },
+            { "muid": 1 },
+            { "muid": 2, "seen": null },
+            { "muid": 3, "seen": "yes" },
+            { "muid": 4, "seen": 2 },
+            { "muid": 5, "seen": [] },
+            { "muid": 6, "seen": {} },
         ]});
-        assert_eq!(seen_flag(&list, "1"), Some(0));
-        assert_eq!(seen_flag(&list, "2"), Some(1));
-        assert_eq!(seen_flag(&list, "3"), Some(1), "seen 없음 → 읽음으로 봐야 한다");
-        assert_eq!(seen_flag(&list, "99"), None, "창 밖은 None — 존재하지 않음과 구분된다");
+        for muid in ["1", "2", "3", "4", "5", "6"] {
+            assert_eq!(seen_flag(&list, muid), Some(SeenState::Unknown), "muid={muid}");
+        }
+        assert_eq!(seen_flag(&list, "99"), None, "창 밖은 None — 상태 미상과 구분된다");
         assert_eq!(seen_flag(&json!({}), "1"), None);
+        assert_eq!(seen_flag(&json!({ "Records": null }), "1"), None);
+        assert_eq!(seen_flag(&json!({ "Records": {} }), "1"), None);
     }
 
     fn sample_init() -> Value {

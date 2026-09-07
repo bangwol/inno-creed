@@ -142,7 +142,7 @@ impl Amaranth {
     }
 
     #[tool(
-        description = "⚠️ **읽음 처리된다** — 서버측 읽음 플래그가 세워진다(실증). 사용자가 아직 안 읽은 메일을 대신 열면 그 사람의 미읽음 표시가 사라진다. 되돌리려면 `mark_mail_unread`. 메일 1건의 본문(평문)·헤더·첨부목록을 조회한다. 본문 HTML은 렌더링하지 않고 평문화(외부 이미지 자동로드 안 함, remoteResourceCount로 경고). 본문에 박힌 이미지 중 **이 서버가 가진 것**은 `inlineImages[]`로 나오고 `download_body_image`로 받아볼 수 있다(외부 호스트 이미지는 일부러 빼며, 그 개수가 remoteResourceCount다). 수신자는 to/cc/bcc로 낸다 — ⚠️ **받은 메일의 bcc는 대개 빈 값**이다(숨은참조는 수신자에게 보이지 않는 필드라 헤더에 남지 않는다). muid=list_mail_inbox의 muid."
+        description = "⚠️ **읽음 처리된다** — 서버측 읽음 플래그가 세워진다(실증). 사용자가 아직 안 읽은 메일을 대신 열면 그 사람의 미읽음 표시가 사라진다. 되돌리려면 `mark_mail_unread` — ⚠️ **받은메일함 최근 200건 안의 메일만 되돌릴 수 있다**(그 밖이면 거절되므로 되돌림을 전제하고 열지 말 것). 메일 1건의 본문(평문)·헤더·첨부목록을 조회한다. 본문 HTML은 렌더링하지 않고 평문화(외부 이미지 자동로드 안 함, remoteResourceCount로 경고). 본문에 박힌 이미지 중 **이 서버가 가진 것**은 `inlineImages[]`로 나오고 `download_body_image`로 받아볼 수 있다(외부 호스트 이미지는 일부러 빼며, 그 개수가 remoteResourceCount다). 수신자는 to/cc/bcc로 낸다 — ⚠️ **받은 메일의 bcc는 대개 빈 값**이다(숨은참조는 수신자에게 보이지 않는 필드라 헤더에 남지 않는다). muid=list_mail_inbox의 muid."
     )]
     async fn read_mail(
         &self,
